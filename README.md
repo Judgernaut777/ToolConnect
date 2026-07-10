@@ -109,8 +109,24 @@ runtime, or the transports. Each of them is replaceable behind an adapter.
 
 * **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the object model, the trust model, the
   interfaces, the reuse verdicts, and the open questions. Start here.
+* **[docs/PHASE1_VALIDATION.md](docs/PHASE1_VALIDATION.md)** — what happened when the three
+  load-bearing assumptions were actually tested. Includes the false positives.
+* **[docs/AGENTCONNECT_CONTRACT.md](docs/AGENTCONNECT_CONTRACT.md)** — the proposed fail-closed
+  integration seam, offered for AgentConnect's maintainer to reject or amend.
 * **[docs/ROADMAP.md](docs/ROADMAP.md)** — phased plan, and what is deliberately deferred.
 * **[docs/STATUS.md](docs/STATUS.md)** — what is actually true today. Read before trusting a spec.
+
+## The prototype
+
+`src/toolconnect/` is a **Phase 1 validation prototype**, not the product. In-memory only: no
+daemon, no database, no HTTP service, no tool execution.
+
+```bash
+uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -e ".[dev]"
+.venv/bin/python -m pytest                        # 52 tests, offline
+.venv/bin/python experiments/flow_experiment.py   # is flow analysis useful?
+.venv/bin/python experiments/drift_experiment.py  # real drift, real repository
+```
 
 ## Honest positioning
 

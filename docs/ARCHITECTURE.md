@@ -167,6 +167,16 @@ been granted exfiltration — whether or not either tool is individually dangero
 composition must be analyzed, not just individual grants.** This is the flow-control problem, and
 it is the one place ToolConnect must reason about tools in combination.
 
+> **Amended by Phase 1.** Measured against a 53-tool catalog, the classes above cannot be asserted
+> of a *tool*. `read_file` reads `credential` when its server is rooted at `/` and merely
+> `internal` when rooted at a project directory — same tool, different scope. 13% of real tools
+> have a data class determined by their arguments, and they are precisely the sensitive readers.
+> **`reads` and `writes` must therefore be asserted per `(tool, scope)` binding; a descriptor
+> without a scope is not assertable.** Scoping the three sensitive readers in a realistic toolset
+> took it from 2 findings to 0. Flow analysis is also a **grant-time review artifact, not a runtime
+> denial rule** — at `authorize()` time the toolset is already granted. See
+> [PHASE1_VALIDATION.md](PHASE1_VALIDATION.md#target-2--toolset-level-flow-analysis).
+
 ### 3.4 Principal
 
 Deliberately shaped to match AgentConnect's worker identity (`{harness, model, tools, sandbox,
@@ -545,15 +555,13 @@ Restating, because scope creep in a governance layer is how it becomes an execut
 
 Unresolved, and requiring a decision from the user rather than a guess from the architecture.
 
-1. **This document contradicts the umbrella.** `Connect` — the docs-only umbrella for the four
-   products, which supersedes the retired Fascia ecosystem — currently records ToolConnect as
-   *"Reserved. Scope undefined. Nothing."* and states as policy that **a reserved name gets no
-   prose.** This document is prose. Either ToolConnect is no longer reserved and Connect's
-   `README`, `ARCHITECTURE`, and `COMPATIBILITY` need updating, or this scope is premature.
-   Resolving that is the user's call; editing Connect is out of scope here.
-2. **Does ToolConnect belong in the family at all?** Connect's `ARCHITECTURE.md` draws
-   AgentConnect → ToolConnect as a dashed arrow labeled *"no contract exists."* This document
-   proposes that contract (§6). It has not been agreed by either side.
+1. ~~**This document contradicts the umbrella.**~~ **Resolved 2026-07-10.** Connect (`@f0cff5c`)
+   now records ToolConnect as *"Design phase — tool-governance platform, no runtime"* and states
+   the decision-point-not-proxy rule. The prose is sanctioned.
+2. **Does ToolConnect belong in the family at all?** Connect's `ARCHITECTURE.md` drew
+   AgentConnect → ToolConnect as a dashed arrow labeled *"no contract exists."*
+   [AGENTCONNECT_CONTRACT.md](AGENTCONNECT_CONTRACT.md) now proposes that contract. It has not
+   been agreed by AgentConnect's side.
 3. **Does AgentConnect adopt ToolConnect, or does ToolConnect stand alone?** The fail-closed rule
    in §6 is a real constraint on AgentConnect's execution path, and it contradicts the optional,
    fail-open posture of every adapter AgentConnect has defined so far. This needs consent, not
@@ -561,10 +569,12 @@ Unresolved, and requiring a decision from the user rather than a guess from the 
 4. **Who asserts descriptors?** Trust-tier promotion is human-only by design. For a registry of any
    size that is a bottleneck. Is there an attestation path — signed descriptors from a verified
    source — that preserves the property without the toil?
-5. **Is flow-control analysis tractable?** §3.3 claims toolset composition can be analyzed for
-   exfiltration paths. Combinatorially this is a reachability problem over data classes and it may
-   produce unusable false-positive rates on realistic toolsets. This is the most load-bearing and
-   least validated idea in the document. It should be prototyped before it is promised.
+5. ~~**Is flow-control analysis tractable?**~~ **Prototyped 2026-07-10. Partially.** It works, no
+   surveyed project does it, and it collapses cleanly (36.7 pairwise paths per finding on a
+   53-tool catalog). But every finding on a realistic toolset traced to a worst-case label that a
+   static descriptor cannot justify, and it is a grant-time artifact rather than a runtime rule.
+   See [PHASE1_VALIDATION.md](PHASE1_VALIDATION.md). The residual question is whether a
+   grant-time review artifact justifies a separate platform.
 6. **Grant encoding.** In-process grants can be Python objects. Cross-process, they need to be
    unforgeable and attenuable — which is what Biscuit is for. Deferring this bakes in an assumption
    that ToolConnect's callers are in-process.

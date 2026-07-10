@@ -2,18 +2,24 @@
 
 **Read this before trusting a spec, and before proposing work.**
 
-ToolConnect is at Phase 0. There is **no implementation** — no runtime, no server, no package, no
-tests, no gate. The repository contains four documents and nothing else. Every interface in
-[ARCHITECTURE.md](ARCHITECTURE.md#5-interfaces) is an illustrative signature, not a committed API.
+ToolConnect is at Phase 1. There is a **validation prototype** — an in-memory library built to
+test three assumptions, not to be the product. There is no runtime, no server, no daemon, no
+database, no HTTP service, and no tool execution. `grep -rn "def invoke" src/` returns nothing,
+and a test asserts it.
 
 | | |
 |---|---|
-| Phase | **0 — architecture and interfaces** |
-| Code | none |
-| Gate | none defined |
-| Language | Python (assumed, matching the sibling projects — not yet decided) |
+| Phase | **1 — validation** ([PHASE1_VALIDATION.md](PHASE1_VALIDATION.md)) |
+| Code | in-memory prototype, ~600 lines under `src/toolconnect/` |
+| Gate | `.venv/bin/python -m pytest` — **52 passing**, offline (verified under `unshare -rn`) |
+| Language | Python 3.11 |
 | Deployment target | single box, local-first, offline decision path |
-| Blocking | six open questions, of which three are questions for the user |
+| Blocking | five go/no-go questions; the decisive one is whether a grant-time review artifact justifies a separate platform |
+
+**Phase 1 results in brief.** Cedar is suitable and proven on aarch64. Flow analysis is real,
+novel, and smaller than advertised. The differentiation claim survives at 2 of 3, with the third
+unproven rather than failed. Full detail, including the false positives, in
+[PHASE1_VALIDATION.md](PHASE1_VALIDATION.md).
 
 ---
 
@@ -32,40 +38,46 @@ information.
 * **Tool authorization fails closed.** Unlike AgentConnect's memory adapter, ToolConnect may not
   degrade to permissive behavior when unavailable.
 * **Policy engine: Cedar via `cedarpy`.** Apache-2.0, in-process, aarch64 wheels, structured
-  explanations. Runner-up `pycasbin`. Rationale and the full rejected set are in
+  explanations. **Validated in Phase 1**: prebuilt wheel, no Rust toolchain, decisions carry
+  determining policy IDs, and the suite passes with no network. `pycasbin` remains the untested
+  fallback. Rationale and rejected set in
   [ARCHITECTURE §4.5](ARCHITECTURE.md#44-permissions-and-45-policy).
+* **A default deny is not a `forbid`.** Cedar returns `Deny` with empty reasons when no policy
+  matched. That is a missing policy, not a policy decision, and the audit record distinguishes them.
+* **Descriptors bind to `(tool, scope)`, not to a tool.** Forced by Phase 1 measurement.
 
 ## What is NOT decided
 
-* Whether ToolConnect should be built at all. See the abandonment condition in
-  [ROADMAP.md](ROADMAP.md#the-condition-under-which-this-roadmap-should-be-abandoned).
-* Whether AgentConnect will accept a fail-closed dependency in its execution path. This is a real
-  architectural disagreement with every adapter boundary AgentConnect has defined so far, and it
-  has not been raised with that project.
-* Whether the flow-control analysis — the claim that toolset composition can be statically analyzed
-  for exfiltration paths — is tractable. It is the most distinctive idea in the design and the
-  least validated. It has never been run against a real toolset.
-* Language, packaging, and gate. Python is assumed because the siblings are Python. Nothing has
-  been chosen.
+* Whether ToolConnect should be built at all. Phase 1 applied the
+  [abandonment condition](ROADMAP.md#the-condition-under-which-this-roadmap-should-be-abandoned)
+  honestly: no claim failed, but "protocol-neutral" is **unproven** — every tool ingested so far
+  was MCP-shaped. Phase 2 must ingest an OpenAPI document or the claim collapses.
+* Whether flow analysis justifies a separate platform now that it is understood to be a grant-time
+  review artifact rather than a runtime control. It is genuinely novel; it is also much smaller
+  than the Phase 0 documents implied.
+* Whether AgentConnect will accept a fail-closed dependency in its execution path. Proposed, not
+  agreed: [AGENTCONNECT_CONTRACT.md](AGENTCONNECT_CONTRACT.md).
+* Who writes the assertions. Phase 1 measured the labeling bottleneck at **100% of tools**.
+* Packaging and distribution beyond the prototype's `pyproject.toml`.
 
 ## Open questions
 
-Three of the six require an answer from the user, not a decision by the architecture. They are
-stated in full in [ARCHITECTURE §9](ARCHITECTURE.md#9-open-questions); in brief:
+Stated in full in [PHASE1_VALIDATION.md](PHASE1_VALIDATION.md#remaining-go-no-go-questions). The
+two that were Phase 0 blockers are now closed:
 
-1. **This repository contradicts the umbrella.** [Connect](https://github.com/Judgernaut777/Connect)
-   records ToolConnect as *"Reserved. Scope undefined. Nothing"* and holds as policy that a
-   reserved name gets no prose. These four documents are prose. Connect's `README`,
-   `ARCHITECTURE`, and `COMPATIBILITY` are now stale with respect to this repository — updating
-   them was outside the scope of this work.
-2. **Does ToolConnect belong in the family?** Connect's `ARCHITECTURE.md` draws
-   AgentConnect → ToolConnect as a dashed arrow labeled "no contract exists." This repository
-   proposes that contract. Neither side has agreed to it.
-3. **Does AgentConnect adopt ToolConnect?** Specifically the fail-closed rule. Requires consent
-   from that project, not an assumption from this one.
+* ~~ToolConnect contradicts the Connect umbrella~~ — **resolved.** Connect `@f0cff5c` lists it as
+  *"Design phase — tool-governance platform, no runtime"* and states the decision-point rule.
+* ~~Is flow analysis tractable?~~ — **prototyped.** Yes, with the caveats above.
 
-The remaining three — descriptor attestation, flow-control tractability, and grant encoding — are
-engineering questions that Phase 1 is designed to answer.
+What remains, decisive first:
+
+1. **Does a grant-time review artifact justify a separate platform?** Answer before Phase 2.
+2. **Does an OpenAPI document survive ingest without an MCP-shaped detour?** The "protocol-neutral"
+   claim is unproven and is the one that would break the premise.
+3. **Is a `(tool, scope)` descriptor assertable in practice?** Trivial for `filesystem`, unclear
+   for `postgres`, meaningless for `run_command`.
+4. **Who writes 53 assertions?** Attestation is the only proposed path and has no design.
+5. **Does AgentConnect accept a fail-closed dependency?** Requires consent from that project.
 
 ## Research provenance
 
