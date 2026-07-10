@@ -427,8 +427,12 @@ promoted, summarized, or fed back as recalled context. Tool outcomes *may* be of
 BrainConnect as capture candidates — always `pending`, never promoted, per WikiBrain's rule that
 promotion is human-only.
 
-*(Open: no `BrainConnect` repository was observed locally. WikiBrain is the existing memory layer.
-Whether BrainConnect is a rename, a successor, or a distinct component is unresolved — see §9.)*
+*(Naming: BrainConnect is WikiBrain renamed. The rename is in progress — the repository is still
+`WikiBrain`, and the `brain_*` tools, `wiki` scripts, `WIKIBRAIN_URL`, and `WikiBrainMemoryAdapter`
+all keep their old names. Read the two as the same product. Note also that BrainConnect has **no
+HTTP server today**: AgentConnect's bootstrap registers a memory adapter at `localhost:8787`, but
+nothing serves it. Any ToolConnect design that assumes a reachable memory endpoint is designing
+against a wire that does not exist.)*
 
 ### ComputeConnect — local inference
 
@@ -541,12 +545,15 @@ Restating, because scope creep in a governance layer is how it becomes an execut
 
 Unresolved, and requiring a decision from the user rather than a guess from the architecture.
 
-1. **BrainConnect's identity.** No such repository was observed. WikiBrain is the memory layer that
-   exists. Is BrainConnect a rename, a successor, or a fourth component? §6 is written against a
-   name whose referent is unconfirmed.
-2. **The `Connect` repository.** It exists, contains only a README, and predates ToolConnect and
-   ComputeConnect. Is it the umbrella for the `*Connect` family, or superseded by Fascia-AI-OS?
-   The relationship between the `*Connect` family and the Fascia ecosystem is undefined.
+1. **This document contradicts the umbrella.** `Connect` — the docs-only umbrella for the four
+   products, which supersedes the retired Fascia ecosystem — currently records ToolConnect as
+   *"Reserved. Scope undefined. Nothing."* and states as policy that **a reserved name gets no
+   prose.** This document is prose. Either ToolConnect is no longer reserved and Connect's
+   `README`, `ARCHITECTURE`, and `COMPATIBILITY` need updating, or this scope is premature.
+   Resolving that is the user's call; editing Connect is out of scope here.
+2. **Does ToolConnect belong in the family at all?** Connect's `ARCHITECTURE.md` draws
+   AgentConnect → ToolConnect as a dashed arrow labeled *"no contract exists."* This document
+   proposes that contract (§6). It has not been agreed by either side.
 3. **Does AgentConnect adopt ToolConnect, or does ToolConnect stand alone?** The fail-closed rule
    in §6 is a real constraint on AgentConnect's execution path, and it contradicts the optional,
    fail-open posture of every adapter AgentConnect has defined so far. This needs consent, not

@@ -53,13 +53,16 @@ information.
 Three of the six require an answer from the user, not a decision by the architecture. They are
 stated in full in [ARCHITECTURE §9](ARCHITECTURE.md#9-open-questions); in brief:
 
-1. **What is BrainConnect?** No such repository was observed locally. WikiBrain is the memory layer
-   that exists. The integration section is written against a name whose referent is unconfirmed.
-2. **What is the `Connect` repository?** It exists, contains only a README, and predates both
-   ToolConnect and ComputeConnect. Is it the umbrella for the `*Connect` family? How does that
-   family relate to the Fascia ecosystem and to Fascia-AI-OS?
-3. **Does AgentConnect adopt ToolConnect?** See above. Requires consent from that project, not an
-   assumption from this one.
+1. **This repository contradicts the umbrella.** [Connect](https://github.com/Judgernaut777/Connect)
+   records ToolConnect as *"Reserved. Scope undefined. Nothing"* and holds as policy that a
+   reserved name gets no prose. These four documents are prose. Connect's `README`,
+   `ARCHITECTURE`, and `COMPATIBILITY` are now stale with respect to this repository — updating
+   them was outside the scope of this work.
+2. **Does ToolConnect belong in the family?** Connect's `ARCHITECTURE.md` draws
+   AgentConnect → ToolConnect as a dashed arrow labeled "no contract exists." This repository
+   proposes that contract. Neither side has agreed to it.
+3. **Does AgentConnect adopt ToolConnect?** Specifically the fail-closed rule. Requires consent
+   from that project, not an assumption from this one.
 
 The remaining three — descriptor attestation, flow-control tractability, and grant encoding — are
 engineering questions that Phase 1 is designed to answer.
