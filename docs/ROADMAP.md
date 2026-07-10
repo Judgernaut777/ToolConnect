@@ -9,7 +9,12 @@ paper, before building the platform that depends on it.
 
 ---
 
-## Phase 0 — Architecture and interfaces *(current)*
+> **Where we are.** Phase 0 complete. Phase 1 **executed** — see
+> [PHASE1_VALIDATION.md](PHASE1_VALIDATION.md). Cedar validated, flow analysis prototyped and
+> materially revised, differentiation reassessed at 2-of-3-with-one-unproven. Phase 2 is gated on
+> one product question and one technical proof, both listed under Phase 1 below.
+
+## Phase 0 — Architecture and interfaces *(complete)*
 
 **Goal.** Establish scope, boundaries, object model, and the seams to the sibling projects. No
 runtime.
@@ -23,26 +28,30 @@ components whose names are guesses. Two of the six open questions are exactly th
 
 ---
 
-## Phase 1 — Resolve the boundaries
+## Phase 1 — Validate the assumptions *(executed 2026-07-10)*
 
-Nothing should be implemented before these are settled, because each one changes the shape of the
-code.
+Full report: **[PHASE1_VALIDATION.md](PHASE1_VALIDATION.md)**. Summary:
 
-* **Answer open questions 1–3.** Is BrainConnect real? Is `Connect` the umbrella? Does AgentConnect
-  accept a fail-closed dependency in its execution path?
-* **Validate the fail-closed rule against AgentConnect.** Every adapter AgentConnect has defined so
-  far is optional and fails open. Tool authorization cannot be. This is a genuine architectural
-  disagreement between the two projects and it must be resolved in AgentConnect's favor or
-  ToolConnect's, explicitly, in writing.
-* **Prototype the flow-control analysis on paper** (open question 5). Take a realistic toolset —
-  the 26 tools in the FloJack brain-router, say, or AgentConnect's worker tools — classify their
-  reads and writes, and compute the exfiltration paths. Count the false positives.
+* ✅ **Cedar via `cedarpy` is suitable.** Prebuilt aarch64 wheel, in-process, no Rust toolchain.
+  Determining policy IDs and `@id` annotations on every decision. 52 tests pass under
+  `unshare -rn` — no network in the decision path. `pycasbin` not needed.
+* ⚠️ **Flow analysis works, and is smaller than claimed.** 3 findings vs 110 pairwise paths on a
+  53-tool catalog. But every finding on a realistic toolset traced to a worst-case label a static
+  descriptor cannot justify, and it is a **grant-time review artifact, not a runtime denial rule.**
+  Descriptors must bind to `(tool, scope)`.
+* ⚠️ **Differentiation: 2 of 3 claims hold; the third is unproven, not failed.** "Protocol-neutral"
+  was never tested — every tool ingested was MCP-shaped.
+* ➕ **Catalog drift found in a real repository.** AgentConnect's spec §17 documents a review loop
+  (`claim_review`, `complete_review`, `get_manager_inbox`) that its MCP adapter does not expose.
+  Detected by comparing two lists; no tool was invoked. AgentConnect was not modified.
 
-**Done when:** the exfiltration analysis either produces a usably small set of true findings on a
-real toolset, or is demoted from a core claim to a future experiment.
+**Two gates before Phase 2 begins, in order:**
 
-**Failure mode:** building the registry first, then discovering that its most distinctive feature
-does not work.
+1. **Product question (the user's).** Does a grant-time review artifact justify a separate
+   platform, rather than a feature contributed to IBM ContextForge?
+2. **Technical proof (ours).** Ingest a real OpenAPI document via `FastMCP.from_openapi` into the
+   same catalog beside the MCP tools. If it needs an MCP-shaped intermediate representation,
+   "protocol-neutral" has failed, leaving one claim standing, and the abandonment rule applies.
 
 ---
 
@@ -50,7 +59,13 @@ does not work.
 
 The catalog, and the artifact that does not exist in any standard.
 
-* `CapabilityDescriptor` as a versioned JSON Schema 2020-12 document, published in-repo.
+* **A Cedar schema** declaring the `Agent` and `Tool` entity types. Phase 1's engine parse-checks
+  policies but cannot type-check them, so `resource.efect` silently evaluates to "attribute absent"
+  and produces an invisible deny. This is the highest-value follow-up in the repository.
+* **Ingest `server.json`** as the declared manifest. Phase 1's drift run produced 11 false
+  "undeclared-present" findings because it diffed against spec *prose*. Prose is not a manifest.
+* `CapabilityDescriptor` as a versioned JSON Schema 2020-12 document, published in-repo, with
+  `reads`/`writes` bound to a `(tool, scope)` pair rather than to a tool.
 * Crosswalk table: MCP annotations → `claimed_*` fields; the `claimed_*` vs `asserted_*` diff as a
   first-class query.
 * SQLite catalog, reconciler loop, monotonic cursor for `watch()`.

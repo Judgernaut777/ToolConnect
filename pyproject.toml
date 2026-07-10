@@ -1,0 +1,21 @@
+[project]
+name = "toolconnect"
+version = "0.0.0"
+description = "Protocol-neutral tool governance: registry, policy decisions, audit. Not an execution engine."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    # Policy decision point. Apache-2.0, in-process, prebuilt aarch64 wheels.
+    # Community-maintained binding to AWS Cedar — pinned deliberately.
+    "cedarpy>=4.8.6,<5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/toolconnect"]
