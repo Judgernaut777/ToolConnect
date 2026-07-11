@@ -150,3 +150,8 @@ and no network hop in the decision path — and which can delegate the in-path p
 exactly those projects as a deployment adapter. The reasoning is in
 [ARCHITECTURE.md](docs/ARCHITECTURE.md#why-not-just-use-contextforge-or-agentgateway), including
 the conditions under which building this is the wrong call.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE); the license text ships in
+the built wheel.

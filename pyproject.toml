@@ -3,7 +3,8 @@ name = "toolconnect"
 version = "0.1.0"
 description = "Protocol-neutral tool governance: registry, policy decisions, audit. Not an execution engine."
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = [
     # Policy decision point. Apache-2.0, in-process, prebuilt aarch64 wheels.
     # Community-maintained binding to AWS Cedar — pinned deliberately.
@@ -17,7 +18,8 @@ dev = ["pytest>=8", "hypothesis>=6"]
 toolconnect = "toolconnect.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+# >=1.27 is the floor for PEP 639 SPDX license expressions + license-files.
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

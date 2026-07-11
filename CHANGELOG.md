@@ -48,5 +48,7 @@ package.
 
 * No authentication on the HTTP surface (loopback bind only).
 * `resolve_toolset`/ToolsetPack and grant-time schema validation are not yet exposed.
-* `pyproject.toml` declares MIT but the repository has no LICENSE file yet (an
-  ecosystem-level decision, tracked at release level).
+* ~~`pyproject.toml` declares MIT but the repository has no LICENSE file yet (an
+  ecosystem-level decision, tracked at release level).~~ Resolved: the ecosystem
+  license decision landed — ToolConnect is Apache-2.0, with the full license text
+  at the repository root and shipped in the wheel.
