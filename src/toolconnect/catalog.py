@@ -19,6 +19,8 @@ Two contracts are load-bearing here:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Iterable
@@ -174,10 +176,21 @@ class Catalog:
 
     @staticmethod
     def _fingerprint(tv: ToolVersion) -> int:
-        """The claim a source is making. Changes when the server redefines the tool."""
+        """The claim a source is making. Changes when the server redefines the tool.
+
+        Stable across processes and interpreter restarts — computed with SHA-256 over
+        a canonical encoding, never with the process-salted builtin ``hash()``. This
+        is what lets an AssertionRecord persisted to disk keep meaning the same claim
+        after a restart. Semantics are unchanged: two ToolVersions have equal
+        fingerprints iff their (version, claim) tuples are equal.
+        """
         c = tv.claimed
-        return hash((tv.ref.version, c.description, c.read_only_hint,
-                     c.destructive_hint, c.idempotent_hint, c.open_world_hint))
+        canonical = json.dumps(
+            [tv.ref.version, c.description, c.read_only_hint,
+             c.destructive_hint, c.idempotent_hint, c.open_world_hint],
+            separators=(",", ":"),
+        )
+        return int.from_bytes(hashlib.sha256(canonical.encode("utf-8")).digest()[:8], "big")
 
     # -- resolution -------------------------------------------------------------
 
