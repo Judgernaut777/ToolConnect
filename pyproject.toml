@@ -1,6 +1,6 @@
 [project]
 name = "toolconnect"
-version = "0.0.0"
+version = "0.1.0"
 description = "Protocol-neutral tool governance: registry, policy decisions, audit. Not an execution engine."
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -12,6 +12,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6"]
+
+[project.scripts]
+toolconnect = "toolconnect.cli:main"
 
 [build-system]
 requires = ["hatchling"]
