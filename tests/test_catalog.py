@@ -25,27 +25,27 @@ class TestAssertionIsHumanOnly:
         c = _cat()
         c.ingest_claimed("s", "a", ClaimedMetadata())
         with pytest.raises(ValueError, match="human-only"):
-            c.assert_descriptor("a", AssertedDescriptor(effect=Effect.READ, asserted_by=""))
+            c.assert_descriptor("s", "a", AssertedDescriptor(effect=Effect.READ, asserted_by=""))
 
     def test_ingest_never_makes_a_tool_invocable(self):
         c = _cat()
         c.ingest_claimed("s", "a", ClaimedMetadata(read_only_hint=True))
-        assert not c.invocable("a"), "a server's claim must not authorize itself"
+        assert not c.invocable("s", "a"), "a server's claim must not authorize itself"
 
     def test_assertion_makes_it_invocable(self):
         c = _cat()
         c.ingest_claimed("s", "a", ClaimedMetadata())
-        c.assert_descriptor("a", _asserted())
-        assert c.invocable("a")
+        c.assert_descriptor("s", "a", _asserted())
+        assert c.invocable("s", "a")
 
     def test_untrusted_source_ceiling_overrides_assertion(self):
         c = _cat(tier=TrustTier.UNTRUSTED)
         c.ingest_claimed("s", "a", ClaimedMetadata())
-        c.assert_descriptor("a", _asserted())
-        assert not c.invocable("a"), "a tool cannot exceed its source's trust ceiling"
+        c.assert_descriptor("s", "a", _asserted())
+        assert not c.invocable("s", "a"), "a tool cannot exceed its source's trust ceiling"
 
     def test_unknown_tool_is_not_invocable(self):
-        assert not _cat().invocable("nope")
+        assert not _cat().invocable("s", "nope")
 
     def test_ingest_from_unknown_source_is_refused(self):
         with pytest.raises(KeyError):
@@ -56,7 +56,7 @@ class TestDrift:
     def test_clean_catalog_has_no_drift(self):
         c = _cat(declares={"a"})
         c.ingest_claimed("s", "a", ClaimedMetadata(read_only_hint=True))
-        c.assert_descriptor("a", _asserted())
+        c.assert_descriptor("s", "a", _asserted())
         r = c.drift("s", {"a"})
         assert r.clean, r.summary()
 
@@ -65,7 +65,7 @@ class TestDrift:
         c = _cat(declares={"a", "b", "claim_review"})
         for n in ("a", "b"):
             c.ingest_claimed("s", n, ClaimedMetadata())
-            c.assert_descriptor(n, _asserted())
+            c.assert_descriptor("s", n, _asserted())
         r = c.drift("s", {"a", "b"})
         assert r.advertised_missing == ("claim_review",)
         assert not r.clean
@@ -74,7 +74,7 @@ class TestDrift:
         c = _cat(declares={"a"})
         for n in ("a", "surprise"):
             c.ingest_claimed("s", n, ClaimedMetadata())
-            c.assert_descriptor(n, _asserted())
+            c.assert_descriptor("s", n, _asserted())
         assert c.drift("s", {"a", "surprise"}).undeclared_present == ("surprise",)
 
     def test_discovered_but_unasserted_is_reported(self):
@@ -86,7 +86,7 @@ class TestDrift:
     def test_claim_conflict_surfaces_in_drift(self):
         c = _cat(declares={"a"})
         c.ingest_claimed("s", "a", ClaimedMetadata(read_only_hint=True))
-        c.assert_descriptor("a", AssertedDescriptor(effect=Effect.DESTRUCTIVE, asserted_by="op"))
+        c.assert_descriptor("s", "a", AssertedDescriptor(effect=Effect.DESTRUCTIVE, asserted_by="op"))
         r = c.drift("s", {"a"})
         assert r.claim_conflicts and r.claim_conflicts[0][0] == "a"
 
@@ -94,7 +94,7 @@ class TestDrift:
         """Approval binds to what the server claimed at review time."""
         c = _cat(declares={"a"})
         c.ingest_claimed("s", "a", ClaimedMetadata(description="harmless", read_only_hint=True))
-        c.assert_descriptor("a", _asserted())
+        c.assert_descriptor("s", "a", _asserted())
         assert c.drift("s", {"a"}).clean
 
         # The server silently redefines the tool under the same name and version.

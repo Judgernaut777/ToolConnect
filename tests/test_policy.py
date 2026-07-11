@@ -127,14 +127,14 @@ class TestBrokerHasNoInvoke:
         cat = Catalog()
         cat.register_source(TrustedSource("s", TrustTier.KNOWN))
         cat.ingest_claimed("s", "r", ClaimedMetadata())
-        cat.assert_descriptor("r", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
+        cat.assert_descriptor("s", "r", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
         cat.ingest_claimed("s", "unreviewed", ClaimedMetadata())
 
         audit: list[dict] = []
         broker = Broker(cat, engine, audit)
-        assert broker.authorize(Principal("a"), "r").allowed
-        assert not broker.authorize(Principal("a"), "unreviewed").allowed
-        assert not broker.authorize(Principal("a"), "ghost").allowed
+        assert broker.authorize(Principal("a"), "s", "r").allowed
+        assert not broker.authorize(Principal("a"), "s", "unreviewed").allowed
+        assert not broker.authorize(Principal("a"), "s", "ghost").allowed
 
         assert len(audit) == 3, "a denial is a decision, not an error"
         assert [e["allowed"] for e in audit] == [True, False, False]
@@ -144,8 +144,8 @@ class TestBrokerHasNoInvoke:
         cat = Catalog()
         cat.register_source(TrustedSource("bad", TrustTier.UNTRUSTED))
         cat.ingest_claimed("bad", "t", ClaimedMetadata())
-        cat.assert_descriptor("t", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
-        d = Broker(cat, engine, []).authorize(Principal("a"), "t")
+        cat.assert_descriptor("bad", "t", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
+        d = Broker(cat, engine, []).authorize(Principal("a"), "bad", "t")
         assert not d.allowed and "not invocable" in d.reason
 
 

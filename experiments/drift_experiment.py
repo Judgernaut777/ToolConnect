@@ -58,7 +58,7 @@ def main() -> int:
     unreviewed = {"get_task_context_pack", "record_memory_feedback"}
     for name in sorted(DISCOVERED_AT_RUNTIME - unreviewed):
         cat.assert_descriptor(
-            name,
+            "agentconnect", name,
             AssertedDescriptor(
                 effect=Effect.READ, reads=frozenset({DataClass.INTERNAL}),
                 asserted_by="operator",

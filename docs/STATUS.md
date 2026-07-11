@@ -11,7 +11,7 @@ and a test asserts it.
 |---|---|
 | Phase | **1 — validation** ([PHASE1_VALIDATION.md](PHASE1_VALIDATION.md)) |
 | Code | in-memory prototype, ~600 lines under `src/toolconnect/` |
-| Gate | `.venv/bin/python -m pytest` — **52 passing**, offline (verified under `unshare -rn`) |
+| Gate | `.venv/bin/python -m pytest` — **152 passing, 2 skipped**, offline (verified under `unshare -rn`) |
 | Language | Python 3.11 |
 | Deployment target | single box, local-first, offline decision path |
 | Blocking | five go/no-go questions; the decisive one is whether a grant-time review artifact justifies a separate platform |
@@ -45,6 +45,11 @@ information.
 * **A default deny is not a `forbid`.** Cedar returns `Deny` with empty reasons when no policy
   matched. That is a missing policy, not a policy decision, and the audit record distinguishes them.
 * **Descriptors bind to `(tool, scope)`, not to a tool.** Forced by Phase 1 measurement.
+* **Tool identity is `(source_id, name)`.** Bare-name lookup fails closed on ambiguity; two
+  sources cannot collide on a name (ARCHITECTURE §2.4). Fixes verification Finding A.
+* **Assertions vouch for a claim fingerprint, and that evidence is durable.** Re-ingesting an
+  identical claim keeps the assertion; a changed claim drops invocability and is reported as a
+  vouched-tool change, distinct from never-asserted (ARCHITECTURE §2.4). Fixes Finding B.
 
 ## What is NOT decided
 

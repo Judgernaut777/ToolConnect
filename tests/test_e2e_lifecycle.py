@@ -43,19 +43,19 @@ class TestFullLifecycle:
         cat.ingest_claimed("fs", "rm", ClaimedMetadata(read_only_hint=False))
 
         # 2. nothing is invocable until an operator asserts it
-        assert not cat.invocable("read")
+        assert not cat.invocable("fs", "read")
 
-        cat.assert_descriptor("read", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
-        cat.assert_descriptor("rm", AssertedDescriptor(effect=Effect.DESTRUCTIVE, asserted_by="op"))
+        cat.assert_descriptor("fs", "read", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
+        cat.assert_descriptor("fs", "rm", AssertedDescriptor(effect=Effect.DESTRUCTIVE, asserted_by="op"))
 
         # 3. list: the filtered, invocable view
-        assert cat.invocable("read") and cat.invocable("rm")
+        assert cat.invocable("fs", "read") and cat.invocable("fs", "rm")
 
         # 4. authorize (decision point) — read allowed, destructive denied by policy
         audit: list = []
         broker = Broker(cat, CedarPolicyEngine(BASIC_CEDAR), audit)
-        allow = broker.authorize(Principal("agent"), "read")
-        deny = broker.authorize(Principal("agent"), "rm")
+        allow = broker.authorize(Principal("agent"), "fs", "read")
+        deny = broker.authorize(Principal("agent"), "fs", "rm")
 
         assert allow.allowed and allow.determining_policies == ("allow-read",)
         assert not deny.allowed
@@ -69,9 +69,10 @@ class TestFullLifecycle:
         broker = Broker(cat, CedarPolicyEngine(BASIC_CEDAR), [])
         # Every read tool the coding agent holds is allowed; nothing crashes.
         for name in CODING_AGENT_TOOLSET:
-            tv = cat.tools.get(name)
+            source_id, _ = cat.resolve(name)
+            tv = cat.get(source_id, name)
             if tv and tv.asserted and tv.asserted.effect is Effect.READ:
-                assert broker.authorize(Principal("coder"), name).allowed
+                assert broker.authorize(Principal("coder"), source_id, name).allowed
 
 
 class TestArchitecturalInvariants:

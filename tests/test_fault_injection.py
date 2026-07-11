@@ -58,14 +58,14 @@ class TestEngineCrash:
 
         cat = _known("t")
         cat.ingest_claimed("s", "t", ClaimedMetadata())
-        cat.assert_descriptor("t", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
+        cat.assert_descriptor("s", "t", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
         # A broker that lets an engine exception escape is a fail-open path; a caller
         # up the stack that swallows it has allowed. So the broker must not propagate.
         with pytest.raises(RuntimeError):
             # Documents CURRENT behavior: Broker.authorize does NOT wrap engine errors.
             # The engine is the fail-closed boundary (test above); the broker assumes a
             # conformant engine. Flagged in VERIFICATION.md as a hardening item.
-            Broker(cat, Boom(), []).authorize(Principal("a"), "t")
+            Broker(cat, Boom(), []).authorize(Principal("a"), "s", "t")
 
 
 class TestUnknownSource:
@@ -80,18 +80,18 @@ class TestDuplicateAndConflictingIdentity:
         c.ingest_claimed("s", "t", ClaimedMetadata(description="first"))
         c.ingest_claimed("s", "t", ClaimedMetadata(description="second"))
         assert len(c.tools) == 1
-        assert c.tools["t"].claimed.description == "second"
+        assert c.get("s", "t").claimed.description == "second"
 
     def test_conflicting_versions_update_the_ref(self):
         c = _known("t")
         c.ingest_claimed("s", "t", ClaimedMetadata(), version="1.0.0")
         c.ingest_claimed("s", "t", ClaimedMetadata(), version="2.0.0")
-        assert c.tools["t"].ref.version == "2.0.0"
+        assert c.get("s", "t").ref.version == "2.0.0"
 
     def test_version_bump_after_assertion_trips_redefinition(self):
         c = _known("t")
         c.ingest_claimed("s", "t", ClaimedMetadata(description="v1"), version="1.0.0")
-        c.assert_descriptor("t", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
+        c.assert_descriptor("s", "t", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
         c.ingest_claimed("s", "t", ClaimedMetadata(description="v2"), version="2.0.0")
         r = c.drift("s", {"t"})
         assert "t" in r.redefined_after_assertion
@@ -101,13 +101,13 @@ class TestMissingMetadata:
     def test_unasserted_tool_is_not_invocable(self):
         c = _known("t")
         c.ingest_claimed("s", "t", ClaimedMetadata(read_only_hint=True))
-        assert not c.invocable("t")
+        assert not c.invocable("s", "t")
 
     def test_authorize_denies_unasserted_and_records_it(self):
         c = _known("t")
         c.ingest_claimed("s", "t", ClaimedMetadata())
         audit: list = []
-        d = Broker(c, CedarPolicyEngine(BASIC_CEDAR), audit).authorize(Principal("a"), "t")
+        d = Broker(c, CedarPolicyEngine(BASIC_CEDAR), audit).authorize(Principal("a"), "s", "t")
         assert not d.allowed
         assert audit and audit[-1]["allowed"] is False
 
@@ -118,7 +118,7 @@ class TestHostileArguments:
         c = _known()
         # Registering a source that declares nothing, then ingesting a hostile name.
         c.ingest_claimed("s", bad, ClaimedMetadata())
-        assert not c.invocable(bad)  # unasserted -> not invocable, no crash
+        assert not c.invocable("s", bad)  # unasserted -> not invocable, no crash
         assert isinstance(c.drift("s", {bad}).summary(), str)
 
     def test_hostile_principal_id_yields_a_denial_not_a_crash(self):

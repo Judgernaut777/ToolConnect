@@ -46,7 +46,7 @@ def main() -> int:
 
     # ------------------------------------------------------- realistic coding agent
     rule("2. Realistic grant (a coding agent on this box)")
-    sub = analyze_toolset(cat.toolset(CODING_AGENT_TOOLSET))
+    sub = analyze_toolset(cat.select(CODING_AGENT_TOOLSET))
     print(f"  toolset size: {len(CODING_AGENT_TOOLSET)}")
     for f in sub.findings:
         print(f"  {f.describe()}")
@@ -60,7 +60,7 @@ def main() -> int:
     # Suppose this deployment reviews artifacts before storage, so `secret` never
     # reaches them. The operator accepts secret->external as a known, intended flow.
     accepted = frozenset({(DataClass.SECRET, DataClass.EXTERNAL)})
-    sup = analyze_toolset(cat.toolset(CODING_AGENT_TOOLSET), accepted=accepted)
+    sup = analyze_toolset(cat.select(CODING_AGENT_TOOLSET), accepted=accepted)
     removed_f = len(sub.findings) - len(sup.findings)
     removed_p = len(sub.pairwise_paths) - len(sup.pairwise_paths)
     print(f"  accepting 1 class-pair removes {removed_f} finding ({removed_p} pairwise paths)")
@@ -84,7 +84,7 @@ def main() -> int:
 
     # ------------------------------------------------------- the minimal-cut question
     rule("4. What must be removed to break every path?")
-    tools = cat.toolset(CODING_AGENT_TOOLSET)
+    tools = cat.select(CODING_AGENT_TOOLSET)
     sinks = sorted({s for f in sub.findings for s in f.sinks})
     readers = sorted({r for f in sub.findings for r in f.readers})
     print(f"  drop all {len(sinks)} sinks, or all {len(readers)} sensitive readers")
@@ -114,12 +114,13 @@ def main() -> int:
         ("read_artifact_chunk", {DataClass.INTERNAL}),  # artifacts reviewed pre-storage
         ("get_task_context_pack", {DataClass.INTERNAL}),
     ):
-        old = scoped.tools[name].asserted
+        sid, _ = scoped.resolve(name)
+        old = scoped.get(sid, name).asserted
         scoped.assert_descriptor(
-            name,
+            sid, name,
             replace_reads(old, frozenset(reads), scope="project-root"),
         )
-    after = analyze_toolset(scoped.toolset(CODING_AGENT_TOOLSET))
+    after = analyze_toolset(scoped.select(CODING_AGENT_TOOLSET))
     print(f"  before scoping: {len(sub.findings)} findings, {len(sub.pairwise_paths)} paths")
     print(f"  after scoping:  {len(after.findings)} findings, {len(after.pairwise_paths)} paths")
     print("  the arg-dependence collapses once the SOURCE is scoped. The descriptor")
@@ -128,7 +129,7 @@ def main() -> int:
     # ------------------------------------------------------------- unlabeled = unknown
     rule("7. Unlabeled tools are not skipped")
     raw = build_catalog(assert_all=False)
-    unl = analyze_toolset(raw.toolset(CODING_AGENT_TOOLSET))
+    unl = analyze_toolset(raw.select(CODING_AGENT_TOOLSET))
     print(f"  with 0 assertions: findings={len(unl.findings)}, unlabeled={len(unl.unlabeled)}")
     print("  an unasserted catalog reports NO findings -- silence, not safety.")
     print("  this is why unasserted tools are quarantined rather than analyzed.")

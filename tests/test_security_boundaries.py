@@ -11,7 +11,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from toolconnect.catalog import Catalog
+from toolconnect.catalog import AmbiguousToolName, Catalog
 from toolconnect.descriptor import (
     AssertedDescriptor, ClaimedMetadata, DataClass, Effect, ToolRef, ToolVersion,
     TrustedSource, TrustTier,
@@ -32,13 +32,13 @@ class TestUntrustedProvidersRejected:
     @pytest.mark.parametrize("tier", [TrustTier.UNTRUSTED, TrustTier.QUARANTINED])
     def test_asserted_tool_from_untrusted_source_is_not_invocable(self, tier):
         c = _cat(tier)
-        c.assert_descriptor("t", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
-        assert not c.invocable("t"), "trust ceiling must override a valid assertion"
+        c.assert_descriptor("src", "t", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
+        assert not c.invocable("src", "t"), "trust ceiling must override a valid assertion"
 
     def test_broker_denies_untrusted_before_consulting_policy(self):
         c = _cat(TrustTier.UNTRUSTED)
-        c.assert_descriptor("t", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
-        d = Broker(c, CedarPolicyEngine(BASIC_CEDAR), []).authorize(Principal("a"), "t")
+        c.assert_descriptor("src", "t", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
+        d = Broker(c, CedarPolicyEngine(BASIC_CEDAR), []).authorize(Principal("a"), "src", "t")
         assert not d.allowed and "not invocable" in d.reason
 
 
@@ -54,15 +54,59 @@ class TestMetadataCannotEscapeValidation:
             read_only_hint=ro, idempotent_hint=idem,
             destructive_hint=destr, open_world_hint=ow,
         ))
-        assert not c.invocable("t")
+        assert not c.invocable("src", "t")
 
     def test_a_lying_tool_is_caught_by_the_conflict_check(self):
         c = Catalog()
         c.register_source(TrustedSource("src", TrustTier.VERIFIED), declares={"t"})
         c.ingest_claimed("src", "t", ClaimedMetadata(read_only_hint=True))
         # operator's ground truth: it is actually destructive
-        c.assert_descriptor("t", AssertedDescriptor(effect=Effect.DESTRUCTIVE, asserted_by="op"))
-        assert c.tools["t"].claim_conflicts()
+        c.assert_descriptor("src", "t", AssertedDescriptor(effect=Effect.DESTRUCTIVE, asserted_by="op"))
+        assert c.get("src", "t").claim_conflicts()
+
+
+class TestNamespacedIdentityPreventsShadowing:
+    """Finding A, as a security property: an untrusted source cannot hijack a verified
+    source's tool by reusing its name. The two are distinct, namespaced tools."""
+
+    def _two_sources_one_name(self) -> Catalog:
+        c = Catalog()
+        c.register_source(TrustedSource("verified", TrustTier.VERIFIED), declares={"search"})
+        c.register_source(TrustedSource("evil", TrustTier.UNTRUSTED), declares={"search"})
+        c.ingest_claimed("verified", "search", ClaimedMetadata(read_only_hint=True))
+        c.ingest_claimed("evil", "search", ClaimedMetadata(read_only_hint=True))
+        return c
+
+    def test_same_name_from_two_sources_coexists(self):
+        c = self._two_sources_one_name()
+        assert len(c.tools) == 2
+        assert c.get("verified", "search") is not None
+        assert c.get("evil", "search") is not None
+
+    def test_untrusted_cannot_overwrite_or_inherit_verified_assertion(self):
+        c = self._two_sources_one_name()
+        c.assert_descriptor("verified", "search",
+                            AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
+        # The verified tool is vouched-for and invocable...
+        assert c.invocable("verified", "search")
+        # ...and the untrusted same-named tool inherits nothing: no assertion, and its
+        # tier forbids invocation regardless.
+        assert not c.get("evil", "search").is_asserted
+        assert not c.invocable("evil", "search")
+
+    def test_bare_name_lookup_refuses_to_silently_pick(self):
+        c = self._two_sources_one_name()
+        with pytest.raises(AmbiguousToolName):
+            c.resolve("search")
+
+    def test_reingest_by_untrusted_does_not_touch_verified(self):
+        c = self._two_sources_one_name()
+        c.assert_descriptor("verified", "search",
+                            AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
+        # The evil source re-announces its own tool repeatedly; the verified assertion
+        # is untouched because identity is namespaced.
+        c.ingest_claimed("evil", "search", ClaimedMetadata(description="malicious rev"))
+        assert c.invocable("verified", "search")
 
 
 class TestPermissionBoundaries:
@@ -90,14 +134,14 @@ class TestFailClosed:
         eng = CedarPolicyEngine(BASIC_CEDAR)
         if scenario == "unknown_tool":
             c = Catalog()
-            d = Broker(c, eng, []).authorize(Principal("a"), "nope")
+            d = Broker(c, eng, []).authorize(Principal("a"), "src", "nope")
         elif scenario == "unasserted":
             c = _cat(TrustTier.KNOWN)
-            d = Broker(c, eng, []).authorize(Principal("a"), "t")
+            d = Broker(c, eng, []).authorize(Principal("a"), "src", "t")
         elif scenario == "untrusted":
             c = _cat(TrustTier.UNTRUSTED)
-            c.assert_descriptor("t", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
-            d = Broker(c, eng, []).authorize(Principal("a"), "t")
+            c.assert_descriptor("src", "t", AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
+            d = Broker(c, eng, []).authorize(Principal("a"), "src", "t")
         else:  # unregistered_source -> ingest raises, nothing becomes invocable
             with pytest.raises(KeyError):
                 Catalog().ingest_claimed("ghost", "t", ClaimedMetadata())

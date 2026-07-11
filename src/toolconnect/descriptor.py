@@ -133,6 +133,16 @@ class ToolVersion:
     input_schema: Mapping[str, object] = field(default_factory=dict)
 
     @property
+    def id(self) -> tuple[str, str]:
+        """Namespaced identity: (source_id, name). Two sources exposing the same
+        bare name are distinct tools and never collide (ARCHITECTURE §3.2)."""
+        return (self.source_id, self.ref.name)
+
+    @property
+    def qualified_name(self) -> str:
+        return f"{self.source_id}:{self.ref.name}"
+
+    @property
     def is_asserted(self) -> bool:
         return self.asserted is not None
 

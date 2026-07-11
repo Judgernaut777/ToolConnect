@@ -16,8 +16,12 @@ confidence, which is worse than a visible gap.
 unshare -rn .venv/bin/python -m pytest  # proof it needs no network
 ```
 
-**Result:** 137 passed, 2 skipped (unbuilt provider types), 1 xfailed (an open defect's
-intended contract). Deterministic (`hypothesis` derandomized, fixed profile) and offline.
+**Result:** 152 passed, 2 skipped (unbuilt provider types), 0 xfailed. Deterministic
+(`hypothesis` derandomized, fixed profile) and offline.
+
+**Findings A and B are fixed** (namespaced identity + durable assertion evidence). The
+strict-xfail that guarded Finding A's intended contract is now a passing regression test; the
+marker is gone. History and the fixed contract are below and in ARCHITECTURE §2.4.
 
 ---
 
@@ -31,7 +35,7 @@ intended contract). Deterministic (`hypothesis` derandomized, fixed profile) and
 | 4 | End-to-end | ⚠️ **Reframed** — `invoke` forbidden by design | `test_e2e_lifecycle.py` |
 | 5 | Compatibility fixtures | ⚠️ **Fixtures only** — no adapters exist | `test_compat_providers.py` |
 | 6 | Security boundaries | ✅ **Covered** (except signatures) | `test_security_boundaries.py` |
-| 7 | Regression | ✅ **Two defects pinned** | `test_regression.py` |
+| 7 | Regression | ✅ **Two defects fixed + guarded** | `test_regression.py` |
 | 8 | Performance sanity | ✅ **Tripwires** | `test_perf_sanity.py` |
 
 ### 1 — Contract / provider conformance
@@ -122,8 +126,8 @@ is visible; it must become real when signatures land.
 
 ### 7 — Regression
 
-Two defects were found *by this suite during verification* and are permanently pinned. See
-Findings below.
+Two defects were found *by this suite during verification*, then fixed, and are now guarded by
+permanent regression tests. See Findings below.
 
 ### 8 — Performance sanity
 
@@ -134,60 +138,67 @@ proxy path to measure.
 
 ---
 
-## Findings
+## Findings — both FIXED
 
-Reported, not fixed — verification does not change implementation. Both are logged here and
-carry regression tests.
+Found by this suite during verification, then fixed in the namespaced-identity +
+assertion-evidence change. The contract is documented in ARCHITECTURE §2.4.
 
-### Finding A — tool-name collision (correctness, security-relevant)
+### Finding A — tool-name collision (correctness, security-relevant) — FIXED
 
-`Catalog.tools` is keyed by bare tool name. Two sources that each offer a tool of the same
-name collide; the second silently overwrites the first (`len(tools) == 1`). This contradicts
-ARCHITECTURE §3.2, which specifies reverse-DNS namespaced identity
-(`io.github.owner/server`).
+**Was:** `Catalog.tools` was keyed by bare tool name. Two sources offering a same-named tool
+collided; the second silently overwrote the first (`len(tools) == 1`). An `untrusted` source
+could shadow a `verified` source's tool by reusing its name, and the bare-name conflation
+also reached flow analysis (two distinct tools sharing a name merged reader/sink identities).
+This contradicted ARCHITECTURE §3.2's namespaced-identity contract.
 
-**Impact:** an `untrusted` source can shadow a `verified` source's tool by reusing its name
-— a registered tool is replaced without warning. The same bare-name conflation also reaches
-flow analysis: two distinct tools sharing a name merge their reader/sink identities.
+**Fix:** the catalog is keyed by `ToolId = (source_id, name)`; `ToolVersion.id` and
+`.qualified_name` expose it. Same-named tools from different sources coexist and are
+independently addressable. Bare-name lookup survives only as `resolve()`/`select()`, which
+raise `AmbiguousToolName` rather than silently pick — fail-closed on ambiguity. `assert_descriptor`,
+`invocable`, `get`, and `Broker.authorize` are all source-qualified.
 
-**Correct contract:** the architecture (namespaced identity). The code is wrong.
+**Guarded by:** `test_regression.py::TestFindingA_NamespacedIdentity` (the assertion that was
+a strict `xfail` at checkpoint `7be628f` now passes) and
+`test_security_boundaries.py::TestNamespacedIdentityPreventsShadowing`.
 
-**Pinned by:** `test_regression.py::TestFindingA_ToolNameCollision`. Current behavior is
-asserted directly; the intended contract is an `xfail(strict=True)` test that will flip to a
-failure the moment the bug is fixed, forcing removal of the marker.
+### Finding B — re-ingestion after assertion — FIXED
 
-**Suggested fix (for the implementer, not done here):** key the catalog by
-`(source_id, name)` or a fully-qualified tool id; make `ToolRef` carry the source.
+**Was:** re-ingesting an already-asserted tool reset it to unasserted (fail-closed, safe) but
+`drift()` reported it as plain `unasserted`, collapsing "never asserted" with "asserted, then
+the server changed the tool."
 
-### Finding B — silent assertion drop on re-ingest (surprising, fail-closed)
+**Fix:** an assertion now records the *claim fingerprint* it vouched for, as durable evidence
+(`AssertionRecord`) that survives re-ingestion. The catalog distinguishes four states via
+`assertion_status()` — never / asserted / re-ingested-unchanged / re-ingested-changed:
 
-Re-ingesting an already-asserted tool resets it to unasserted (so `invocable` → `False`,
-the *safe* direction) but leaves the prior assertion fingerprint in place. `drift()` then
-reports the tool as `unasserted` rather than surfacing that a previously-vouched tool
-changed underneath the operator.
+* **Never asserted** → `drift.unasserted`; not invocable.
+* **Re-ingested unchanged** (same claim the operator vouched for) → assertion *stands*; still
+  invocable. Identical re-announcement is a no-op, not a forced re-review.
+* **Re-ingested changed** → not invocable until re-asserted, and reported as
+  `drift.redefined_after_assertion` — a vouched-tool change, **distinct** from never-asserted.
+* **Re-asserted** → invocability restored, bound to the *new* fingerprint only; reverting to an
+  un-vouched prior claim does not restore it.
 
-**Impact:** low — the failure mode is fail-closed. But an operator watching drift sees
-"unasserted," not "a tool you approved was re-announced," which is the more actionable
-signal. Whether this is a bug or acceptable behavior is a design call for the implementer.
+The chosen contract is the handoff's **preferred** contract (fingerprint as assertion
+evidence), documented in ARCHITECTURE §2.4.
 
-**Pinned by:** `test_regression.py::TestFindingB_SilentAssertionDropOnReingest`, which
-records the current behavior so any change is noticed. Not `xfail`-ed, because the intended
-contract is a design decision, not an unambiguous defect.
+**Guarded by:** `test_regression.py::TestFindingB_ReingestionAfterAssertion` — six cases
+covering never-asserted, re-ingested-unchanged, re-ingested-changed, changed-cannot-invoke,
+provenance-preserved, and re-assertion-restores-for-new-fingerprint-only.
 
 ---
 
 ## Non-negotiables honored
 
-* **No test was weakened to make code pass.** The three initial failures were resolved by
-  correcting *test modeling* (a hypothesis/fixture-scope interaction; a strategy that
-  generated unrealistic duplicate names) — the assertions themselves are unchanged and still
-  bind the full contract.
-* **No failing test was removed.** Finding A's intended-contract test remains, as a strict
-  `xfail` that guards the eventual fix.
+* **No test was weakened.** The verification suite's assertions were preserved or
+  strengthened; call sites were migrated to the source-qualified API, and the strict-xfail
+  became a passing regression test rather than being deleted.
+* **No invocation surface was added.** `grep -rn "def invoke|def execute|def route" src/`
+  is empty, and `test_e2e_lifecycle.py` asserts the absence.
 * **Deterministic and offline.** Derandomized hypothesis profile; the whole suite passes
   under `unshare -rn`.
-* **Confidence over coverage.** No line-coverage target was chased. The suite is built to
-  break an incorrect implementation — and it already did, twice.
+* **No persistence/schema change.** The model change is in-memory only: a `ToolId` key and an
+  `AssertionRecord` map. ToolConnect remains a decision point with no database.
 
 ## When the blocked areas unblock
 
@@ -198,4 +209,3 @@ builds Phase 2:
    fault injection (3), and the identical-behavior compatibility suite (5).
 2. Canonical-schema argument validation → unblocks parameter-validation property tests (2).
 3. Cryptographic source attestation → unblocks invalid-signature security tests (6).
-4. Namespaced tool identity → closes Finding A and flips its `xfail` to a passing test.

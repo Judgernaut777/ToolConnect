@@ -102,6 +102,38 @@ server-side, before issuing a grant** — and records which keywords were droppe
 provider projection as part of the tool's audit metadata. The downcompiler is a governance
 artifact, not a formatting convenience.
 
+## 2.4 Namespaced identity and assertion evidence
+
+Two contracts the Phase 1 prototype implements, both hardened after verification found them
+missing (docs/VERIFICATION.md, Findings A and B).
+
+**Identity is namespaced.** A tool is `(source_id, name)`, never a bare name. Two sources may each
+expose a `search`; they are distinct tools and neither can overwrite, mutate, or inherit the
+assertion state of the other. This is what makes §2.2's trust tiers enforceable: without it, an
+`untrusted` source could shadow a `verified` source's tool simply by reusing its name, and a
+bare-name lookup would silently pick one. Bare-name lookup is retained only as a convenience and
+**fails closed on ambiguity** — it resolves a name only when exactly one source exposes it, and
+raises otherwise. It never guesses.
+
+**An assertion vouches for a specific claim, and that evidence is durable.** When an operator
+asserts a descriptor, the registry records the *claim fingerprint* that was vouched for. That
+record survives re-ingestion. This yields four distinct, non-collapsing states for a tool:
+
+| State | Meaning | Invocable? |
+|---|---|---|
+| never asserted | no operator ever vouched | no |
+| asserted | vouched, and the current claim still matches | yes (tier permitting) |
+| re-ingested unchanged | server re-announced the *same* claim | yes — the assertion stands |
+| re-ingested changed | server changed the tool under a vouched name | **no** — re-assertion required |
+
+The last two are the point. Re-announcing an identical claim is a no-op, not an invalidation — it
+does not force needless re-review. But a *changed* claim under a previously-vouched name drops
+invocability and is reported by drift as `redefined_after_assertion` — a vouched-tool change,
+**distinct from a tool that was never asserted at all**. Collapsing those two into one "unasserted"
+signal hides exactly the rug-pull the fingerprint exists to catch. Re-assertion binds to the new
+fingerprint; reverting to an old claim the operator did not re-vouch for does not restore
+invocability.
+
 ## 3. Object model
 
 ```
