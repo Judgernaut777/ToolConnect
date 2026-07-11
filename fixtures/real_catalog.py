@@ -163,7 +163,7 @@ def build_catalog(assert_all: bool = True) -> Catalog:
         )
         if assert_all:
             cat.assert_descriptor(
-                name,
+                sid, name,
                 AssertedDescriptor(
                     effect=effect,
                     reads=frozenset(reads),

@@ -45,12 +45,12 @@ def test_registry_startup_under_50ms():
 
 def test_tool_lookup_under_5ms():
     c = build_catalog()
-    assert _best_ms(lambda: c.invocable("read_file")) < 5.0
+    assert _best_ms(lambda: c.invocable("filesystem", "read_file")) < 5.0
 
 
 def test_toolset_resolution_under_5ms():
     c = build_catalog()
-    assert _best_ms(lambda: c.toolset(CODING_AGENT_TOOLSET)) < 5.0
+    assert _best_ms(lambda: c.select(CODING_AGENT_TOOLSET)) < 5.0
 
 
 def test_flow_analysis_of_full_catalog_under_25ms():
@@ -68,5 +68,5 @@ def test_policy_decision_under_10ms():
     # Engine construction parses once; a single decision must stay cheap.
     eng = CedarPolicyEngine(BASIC_CEDAR)
     c = build_catalog()
-    tool = c.tools["read_file"]
+    tool = c.get("filesystem", "read_file")
     assert _best_ms(lambda: eng.decide(Principal("a"), tool, {})) < 10.0

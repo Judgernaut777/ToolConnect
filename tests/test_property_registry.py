@@ -32,14 +32,14 @@ class TestIngestNeverAuthorizes:
     def test_ingest_alone_never_makes_invocable(self, tier, name, ro):
         c = _catalog(tier, {name})
         c.ingest_claimed("s", name, ClaimedMetadata(read_only_hint=ro))
-        assert not c.invocable(name), "a claim must never authorize itself"
+        assert not c.invocable("s", name), "a claim must never authorize itself"
 
     @given(tier=tiers, name=names)
     def test_invocable_iff_asserted_and_tier_permits(self, tier, name):
         c = _catalog(tier, {name})
         c.ingest_claimed("s", name, ClaimedMetadata())
-        c.assert_descriptor(name, AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
-        assert c.invocable(name) == tier.invocable
+        c.assert_descriptor("s", name, AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
+        assert c.invocable("s", name) == tier.invocable
 
     @given(name=names, by=st.text(max_size=4))
     def test_assertion_requires_a_named_operator(self, name, by):
@@ -47,11 +47,11 @@ class TestIngestNeverAuthorizes:
         c.ingest_claimed("s", name, ClaimedMetadata())
         desc = AssertedDescriptor(effect=Effect.READ, asserted_by=by)
         if by:
-            c.assert_descriptor(name, desc)
-            assert c.invocable(name)
+            c.assert_descriptor("s", name, desc)
+            assert c.invocable("s", name)
         else:
             with pytest.raises(ValueError):
-                c.assert_descriptor(name, desc)
+                c.assert_descriptor("s", name, desc)
 
 
 class TestDriftIsExactSetArithmetic:
@@ -78,7 +78,7 @@ class TestDriftIsExactSetArithmetic:
         c = _catalog(TrustTier.KNOWN, names)
         for n in names:
             c.ingest_claimed("s", n, ClaimedMetadata(read_only_hint=True))
-            c.assert_descriptor(n, AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
+            c.assert_descriptor("s", n, AssertedDescriptor(effect=Effect.READ, asserted_by="op"))
         r = c.drift("s", names)
         assert r.clean, r.summary()
 
@@ -91,11 +91,20 @@ class TestDriftIsExactSetArithmetic:
 
 class TestToolset:
     @given(registered=name_sets, requested=name_sets)
-    def test_toolset_returns_only_registered_names_sorted(self, registered, requested):
+    def test_toolset_returns_only_registered_ids_sorted(self, registered, requested):
         c = _catalog(TrustTier.KNOWN, set())
         for n in registered:
             c.ingest_claimed("s", n, ClaimedMetadata())
-        got = c.toolset(requested)
-        got_names = [tv.ref.name for tv in got]
-        assert got_names == sorted(registered & requested)
-        assert len(got_names) == len(set(got_names))
+        requested_ids = {("s", n) for n in requested}
+        got = c.toolset(requested_ids)
+        got_ids = [tv.id for tv in got]
+        assert got_ids == sorted(("s", n) for n in registered & requested)
+        assert len(got_ids) == len(set(got_ids))
+
+    @given(names=name_sets)
+    def test_resolve_is_unambiguous_for_single_source(self, names):
+        c = _catalog(TrustTier.KNOWN, set())
+        for n in names:
+            c.ingest_claimed("s", n, ClaimedMetadata())
+        for n in names:
+            assert c.resolve(n) == ("s", n)  # one source -> never ambiguous

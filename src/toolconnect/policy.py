@@ -155,13 +155,18 @@ class Broker:
     engine: PolicyEngine
     audit: list[dict]
 
-    def authorize(self, principal: Principal, name: str, context: dict | None = None) -> Decision:
-        tool = self.catalog.tools.get(name)
+    def authorize(
+        self, principal: Principal, source_id: str, name: str, context: dict | None = None
+    ) -> Decision:
+        """Authorize a namespaced tool. Identity is (source_id, name); a bare name is
+        never resolved here, so one source cannot be authorized in place of another."""
+        tool = self.catalog.get(source_id, name)
+        qualified = f"{source_id}:{name}"
         if tool is None:
-            d = Decision(False, f"unknown tool {name!r}", ("<unregistered>",))
-        elif not self.catalog.invocable(name):
+            d = Decision(False, f"unknown tool {qualified!r}", ("<unregistered>",))
+        elif not self.catalog.invocable(source_id, name):
             tier = self.catalog.sources[tool.source_id].tier.value
-            d = Decision(False, f"{name} not invocable (source tier={tier}, asserted={tool.is_asserted})",
+            d = Decision(False, f"{qualified} not invocable (source tier={tier}, asserted={tool.is_asserted})",
                          ("<not-invocable>",))
         else:
             d = self.engine.decide(principal, tool, context or {})
@@ -170,7 +175,9 @@ class Broker:
         self.audit.append(
             {
                 "principal": principal.id,
+                "source": source_id,
                 "tool": name,
+                "qualified": qualified,
                 "allowed": d.allowed,
                 "reason": d.reason,
                 "determining_policies": list(d.determining_policies),
