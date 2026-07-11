@@ -1,0 +1,16 @@
+# ToolConnect configuration example.
+#
+# Usage:   toolconnect serve --config examples/toolconnect.toml
+# Explicit flags (--db, --policies, --host, --port) override these values.
+
+# SQLite database. Created (with parent directories) on first open.
+db = "~/.local/share/toolconnect/toolconnect.db"
+
+# Cedar policy file. Required: a decision point must be told its policy set
+# explicitly. An unparseable set refuses to start; an empty set denies everything.
+policies = "examples/policies.cedar"
+
+# Bind address. Default 127.0.0.1:8095 — loopback only; putting a fail-closed
+# decision point on a public interface is an operator decision, not a default.
+host = "127.0.0.1"
+port = 8095
