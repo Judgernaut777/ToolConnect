@@ -167,7 +167,8 @@ information you need to explain the outage, and creates a registration storm on 
 
 ### 3.2 Tool and ToolVersion
 
-Tool identity is a reverse-DNS name (following the MCP registry's `io.github.owner/server`
+Tool identity is namespaced by source — implemented as the `(source_id, name)` tuple of §2.4,
+where `source_id` is a reverse-DNS namespace (following the MCP registry's `io.github.owner/server`
 convention). **Capability descriptors bind to a version, not a tool.** A tool whose descriptor
 changes has a new version, and a new version starts at the source's trust ceiling minus review.
 This is the rug-pull defense: approval is granted to `acme/db@1.2.0`, never to `acme/db`.
