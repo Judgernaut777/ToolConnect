@@ -56,7 +56,7 @@ Errors are `{"error": {"status": N, "message": "..."}}`.
 | Route | Purpose |
 |---|---|
 | `GET /health` | status, version, source/tool counts, audit-chain state |
-| `POST /sources` | register a source: `{source_id, tier, transport?, declares?, command?}` |
+| `POST /sources` | register a source: `{source_id, tier, transport?, declares?, command?}`; `tier` is one of `verified` \| `known` \| `untrusted` \| `quarantined` (anything else is a `400`; only `verified`/`known` tools can ever become invocable) |
 | `GET /sources` | list sources with their declared and ingested tools |
 | `POST /sources/{source_id}/ingest` | run real MCP stdio discovery against the source's configured `command`; body `{timeout?}` (capped at 60 s) |
 | `POST /sources/{source_id}/tools` | push-style ingest for non-stdio sources: `{tools: [{name, version?, claimed?, input_schema?}]}` |
@@ -66,7 +66,7 @@ Errors are `{"error": {"status": N, "message": "..."}}`.
 | `GET /assertions/{source_id}/{name}` | assertion status, fingerprint evidence, invocability |
 | `GET /drift/{source_id}` | drift against the **last successful discovery**; `409` if no discovery was ever observed — an unobserved source has unknown drift, not none |
 | `POST /authorize` | `{principal, source_id, name, context?}` → a Decision |
-| `POST /decisions/{decision_id}/outcome` | close the loop: `{outcome, detail?}`; unknown ids are `404` |
+| `POST /decisions/{decision_id}/outcome` | close the loop: `{outcome, detail?}`; `detail`, when present, must be a JSON object (`400` otherwise); unknown ids are `404` |
 | `GET /audit?kind=&limit=` | newest-first audit records (kinds: `decision`, `outcome`, `ingest`, `assertion`, `drift`, `source`) |
 | `GET /audit/verify` | walk the hash chain; reports the first broken record |
 

@@ -341,6 +341,8 @@ class ToolConnectService:
 
     def authorize(self, principal: Mapping[str, Any], source_id: str, name: str,
                   context: Mapping[str, Any] | None = None) -> dict:
+        if context is not None and not isinstance(context, Mapping):
+            raise ServiceError(400, "context must be a JSON object")
         p = _parse_principal(principal)
         d = self.broker.authorize(p, source_id, name, dict(context or {}))
         decision_id = self._audit_log[-1]["decision_id"]
@@ -351,6 +353,8 @@ class ToolConnectService:
         """Close the loop on an issued decision (contract §3: record())."""
         if not decision_id:
             raise ServiceError(400, "decision_id is required")
+        if detail is not None and not isinstance(detail, Mapping):
+            raise ServiceError(400, "detail must be a JSON object")
         found = self.store.find_decision(decision_id)
         if found is None:
             raise ServiceError(404, f"unknown decision {decision_id!r}")

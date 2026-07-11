@@ -181,6 +181,36 @@ class TestRoutes:
         status, body = _call("GET", f"{base_url}/audit?kind=ingest")
         assert body["records"][0]["body"]["ok"] is False
 
+    @pytest.mark.parametrize("bad_detail", ["a string", ["a", "list"], 7],
+                             ids=["string", "list", "number"])
+    def test_outcome_with_non_object_detail_is_a_400_not_a_500(self, base_url,
+                                                               bad_detail):
+        """Regression (verification v3 defect 1): a non-object `detail` used to
+        blow up in dict() and surface as a 500 "internal error". It must be the
+        documented 400 validation shape."""
+        status, body = _call("POST", f"{base_url}/authorize", {
+            "principal": {"id": "agent-x"}, "source_id": "nowhere", "name": "ghost"})
+        assert status == 200  # a denial is still a decision, with an id
+        decision_id = body["decision_id"]
+
+        status, body = _call("POST", f"{base_url}/decisions/{decision_id}/outcome",
+                             {"outcome": "success", "detail": bad_detail})
+        assert status == 400
+        assert body["error"]["status"] == 400
+        assert "detail" in body["error"]["message"]
+
+        # The same request with an object detail still closes the loop.
+        status, body = _call("POST", f"{base_url}/decisions/{decision_id}/outcome",
+                             {"outcome": "success", "detail": {"note": "ok"}})
+        assert status == 200
+
+    def test_authorize_with_non_object_context_is_a_400(self, base_url):
+        status, body = _call("POST", f"{base_url}/authorize", {
+            "principal": {"id": "agent-x"}, "source_id": "s", "name": "t",
+            "context": "not an object"})
+        assert status == 400
+        assert "context" in body["error"]["message"]
+
     def test_malformed_request_body_is_a_400(self, base_url):
         req = urllib.request.Request(
             f"{base_url}/authorize", data=b"{not json", method="POST",
