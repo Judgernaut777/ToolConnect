@@ -470,12 +470,14 @@ promoted, summarized, or fed back as recalled context. Tool outcomes *may* be of
 BrainConnect as capture candidates — always `pending`, never promoted, per WikiBrain's rule that
 promotion is human-only.
 
-*(Naming: BrainConnect is WikiBrain renamed. The rename is in progress — the repository is still
-`WikiBrain`, and the `brain_*` tools, `wiki` scripts, `WIKIBRAIN_URL`, and `WikiBrainMemoryAdapter`
-all keep their old names. Read the two as the same product. Note also that BrainConnect has **no
-HTTP server today**: AgentConnect's bootstrap registers a memory adapter at `localhost:8787`, but
-nothing serves it. Any ToolConnect design that assumes a reachable memory endpoint is designing
-against a wire that does not exist.)*
+*(Naming: BrainConnect is WikiBrain renamed, and the rename is complete — the GitHub repository is
+`BrainConnect`, the CLI package and MCP server both register as `brainconnect`
+(`cli/brainconnect/mcp_server.py`). The `brain_*` tool names are kept deliberately. On the
+AgentConnect side two legacy names survive for compatibility: the `WikiBrainMemoryAdapter` class
+and the `WIKIBRAIN_URL` env var (accepted alongside `BRAINCONNECT_URL`). BrainConnect now ships an
+HTTP transport — `brainconnect serve`, default `127.0.0.1:8787`, serving exactly the routes that
+adapter calls — but it is opt-in: the memory endpoint is reachable only when an operator runs it,
+so a ToolConnect design must still degrade cleanly when the wire is absent.)*
 
 ### ComputeConnect — local inference
 

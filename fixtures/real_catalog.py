@@ -4,7 +4,8 @@ Provenance, so the flow-analysis numbers can be trusted or disputed:
 
 * `agentconnect` — the 17 tools actually registered by `@mcp.tool()` in
   `packages/agentconnect-mcp/src/agentconnect/mcp/server.py` (read 2026-07-10).
-* `brainconnect`  — the 9 `brain_*` tools in `cli/wiki/mcp_server.py` (WikiBrain).
+* `brainconnect`  — the 9 `brain_*` tools in `cli/brainconnect/mcp_server.py`
+  (BrainConnect, formerly WikiBrain; tool set re-checked against that file 2026-07-12).
 * `filesystem`, `github`, `slack`, `fetch`, `postgres`, `shell` — the tool names of the
   widely-deployed reference MCP servers. Representative rather than transcribed.
 

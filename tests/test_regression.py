@@ -141,3 +141,61 @@ class TestFindingB_ReingestionAfterAssertion:
         c.ingest_claimed("s", "t", ClaimedMetadata(description="v1", read_only_hint=True))
         assert not c.invocable("s", "t")
         assert c.assertion_status("s", "t") is AssertionStatus.CHANGED
+
+
+# ------------------------------------------------------------------- Finding C
+# WAS: POST /decisions/{id}/outcome with a non-object `detail` (a string, list, or
+# number) blew up in `dict(detail)` inside record_outcome and surfaced as a 500
+# "internal error" instead of the documented 400 validation error. It failed
+# closed (no allow, no audit corruption), but a malformed request must be told
+# *what it did wrong*, not handed a stack-trace summary. FIXED: `detail` (and the
+# same-shaped `context` on authorize) are validated as JSON objects and rejected
+# with ServiceError(400) before any state is touched.
+
+class TestFindingC_NonObjectBodyMembersAre400:
+    @pytest.fixture()
+    def service(self, tmp_path):
+        from toolconnect.policy import CedarPolicyEngine
+        from toolconnect.service import ToolConnectService
+        from toolconnect.store import SqliteStore
+        store = SqliteStore(tmp_path / "tc.db")
+        svc = ToolConnectService(store, CedarPolicyEngine(""))
+        yield svc
+        store.close()
+
+    def _decision_id(self, service) -> str:
+        # A denial is still a decision, recorded with an id — no catalog needed.
+        payload = service.authorize({"id": "agent-x"}, "nowhere", "nothing")
+        assert payload["allowed"] is False
+        return payload["decision_id"]
+
+    @pytest.mark.parametrize("bad_detail", ["a string", ["a", "list"], 7],
+                             ids=["string", "list", "number"])
+    def test_non_object_detail_is_a_400_not_a_500(self, service, bad_detail):
+        from toolconnect.service import ServiceError
+        decision_id = self._decision_id(service)
+        with pytest.raises(ServiceError) as exc_info:
+            service.record_outcome(decision_id, "success", bad_detail)
+        assert exc_info.value.status == 400
+        assert "detail" in str(exc_info.value)
+
+    def test_object_detail_still_records(self, service):
+        decision_id = self._decision_id(service)
+        out = service.record_outcome(decision_id, "success", {"note": "ok"})
+        assert out["decision_id"] == decision_id
+
+    def test_bad_detail_appends_nothing_to_the_audit_chain(self, service):
+        from toolconnect.service import ServiceError
+        decision_id = self._decision_id(service)
+        before = len(service.read_audit(limit=1000))
+        with pytest.raises(ServiceError):
+            service.record_outcome(decision_id, "success", "a string")
+        assert len(service.read_audit(limit=1000)) == before
+
+    def test_non_object_context_on_authorize_is_a_400(self, service):
+        from toolconnect.service import ServiceError
+        with pytest.raises(ServiceError) as exc_info:
+            service.authorize({"id": "agent-x"}, "nowhere", "nothing",
+                              context="not an object")
+        assert exc_info.value.status == 400
+        assert "context" in str(exc_info.value)

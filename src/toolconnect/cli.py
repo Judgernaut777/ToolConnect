@@ -74,7 +74,12 @@ def _cmd_serve(args) -> int:
     if not policies.exists():
         raise SystemExit(f"policy file not found: {policies_path}")
 
-    engine = CedarPolicyEngine(policies.read_text())  # raises on an unparseable set
+    try:
+        engine = CedarPolicyEngine(policies.read_text())
+    except ValueError as exc:
+        # An unparseable policy set must never become a running server; refuse
+        # with one actionable line instead of a traceback.
+        raise SystemExit(f"{exc} (policy file: {policies_path})")
     store = SqliteStore(db)
     service = ToolConnectService(store, engine)
     print(f"toolconnect serving on http://{host}:{port} "

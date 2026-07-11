@@ -57,6 +57,9 @@ class TestCli:
         assert out.returncode != 0
         # A policy set that does not parse must never become an allow-all server.
         assert "invalid Cedar policy set" in out.stderr
+        # ...and the refusal is one actionable line, not a raw traceback.
+        assert "Traceback" not in out.stderr
+        assert str(bad) in out.stderr
 
 
 class TestExamples:
