@@ -4,8 +4,16 @@
 authority on *which* tools exist, *what they do*, *who may call them*, *whether they are
 healthy*, and *what happened when they were called*.
 
-ToolConnect is **architecture and interfaces only**. There is no runtime, no server, and no
-code in this repository yet. See [docs/STATUS.md](docs/STATUS.md) before proposing work.
+As of **0.1.0** there is a runtime: SQLite persistence, `toolconnect serve` (a loopback HTTP
+decision service on 127.0.0.1:8095), a real MCP stdio discovery adapter, and an installable
+wheel with a CLI — see [docs/SERVICE.md](docs/SERVICE.md). What there is deliberately **not**,
+and never will be, is tool execution: no `invoke()`, no proxy, no data path. See
+[docs/STATUS.md](docs/STATUS.md) before proposing work.
+
+```
+toolconnect init-db --db ./toolconnect.db
+toolconnect serve --db ./toolconnect.db --policies examples/policies.cedar
+```
 
 ---
 

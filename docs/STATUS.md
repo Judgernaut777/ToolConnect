@@ -2,19 +2,21 @@
 
 **Read this before trusting a spec, and before proposing work.**
 
-ToolConnect is at Phase 1. There is a **validation prototype** — an in-memory library built to
-test three assumptions, not to be the product. There is no runtime, no server, no daemon, no
-database, no HTTP service, and no tool execution. `grep -rn "def invoke" src/` returns nothing,
-and a test asserts it.
+ToolConnect is at **0.1.0**: the Phase 1 in-memory decision core is now wrapped in a runtime —
+SQLite persistence, a loopback HTTP service (`toolconnect serve`, 127.0.0.1:8095), a real MCP
+stdio discovery adapter, and an installable wheel with a CLI. See [SERVICE.md](SERVICE.md).
+What has **not** changed: there is still no tool execution anywhere. `grep -rn "def invoke" src/`
+returns nothing, tests assert no invocation route exists, and the MCP adapter has no `tools/call`.
+The in-memory core remains the semantic authority; persistence hydrates and stores it.
 
 | | |
 |---|---|
-| Phase | **1 — validation** ([PHASE1_VALIDATION.md](PHASE1_VALIDATION.md)) |
-| Code | in-memory prototype, ~600 lines under `src/toolconnect/` |
-| Gate | `.venv/bin/python -m pytest` — **175 passing, 2 skipped**, offline (verified under `unshare -rn`) |
+| Phase | **1 complete + 0.1.0 runtime** ([PHASE1_VALIDATION.md](PHASE1_VALIDATION.md), [SERVICE.md](SERVICE.md), [CHANGELOG.md](../CHANGELOG.md)) |
+| Code | decision core + store/service/server/CLI/MCP adapter under `src/toolconnect/` |
+| Gate | `.venv/bin/python -m pytest` — **229 passing, 2 skipped**; under `unshare -rn` the 8 HTTP-socket tests also skip (loopback down), everything else passes offline |
 | Language | Python 3.11 |
 | Deployment target | single box, local-first, offline decision path |
-| Blocking | five go/no-go questions; the decisive one is whether a grant-time review artifact justifies a separate platform |
+| Blocking | the go/no-go questions below; the decisive one is whether a grant-time review artifact justifies a separate platform |
 
 **Phase 1 results in brief.** Cedar is suitable and proven on aarch64. Flow analysis is real,
 novel, and smaller than advertised. The differentiation claim survives at 2 of 3, with the third
@@ -63,7 +65,9 @@ information.
 * Whether AgentConnect will accept a fail-closed dependency in its execution path. Proposed, not
   agreed: [AGENTCONNECT_CONTRACT.md](AGENTCONNECT_CONTRACT.md).
 * Who writes the assertions. Phase 1 measured the labeling bottleneck at **100% of tools**.
-* Packaging and distribution beyond the prototype's `pyproject.toml`.
+* Distribution beyond a locally-built wheel (0.1.0 packages and installs cleanly; no index
+  publication is planned or decided). Licensing: `pyproject.toml` declares MIT but the repository
+  has **no LICENSE file** — an ecosystem-level decision deferred to the Connect release process.
 
 ## Open questions
 
