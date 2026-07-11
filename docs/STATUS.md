@@ -11,7 +11,7 @@ and a test asserts it.
 |---|---|
 | Phase | **1 — validation** ([PHASE1_VALIDATION.md](PHASE1_VALIDATION.md)) |
 | Code | in-memory prototype, ~600 lines under `src/toolconnect/` |
-| Gate | `.venv/bin/python -m pytest` — **152 passing, 2 skipped**, offline (verified under `unshare -rn`) |
+| Gate | `.venv/bin/python -m pytest` — **175 passing, 2 skipped**, offline (verified under `unshare -rn`) |
 | Language | Python 3.11 |
 | Deployment target | single box, local-first, offline decision path |
 | Blocking | five go/no-go questions; the decisive one is whether a grant-time review artifact justifies a separate platform |

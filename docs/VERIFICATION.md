@@ -16,8 +16,10 @@ confidence, which is worse than a visible gap.
 unshare -rn .venv/bin/python -m pytest  # proof it needs no network
 ```
 
-**Result:** 152 passed, 2 skipped (unbuilt provider types), 0 xfailed. Deterministic
-(`hypothesis` derandomized, fixed profile) and offline.
+**Result:** 175 passed, 2 skipped (unbuilt provider types), 0 xfailed. Deterministic
+(`hypothesis` derandomized, fixed profile) and offline. (152 from the implementation commit
+`684d418`, plus 23 adversarial tests added by the independent verification pass in
+`tests/test_adversarial_684d418.py`.)
 
 **Findings A and B are fixed** (namespaced identity + durable assertion evidence). The
 strict-xfail that guarded Finding A's intended contract is now a passing regression test; the
