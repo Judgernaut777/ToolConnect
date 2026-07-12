@@ -211,6 +211,51 @@ class TestAuditChain:
         v = store.verify_chain()
         assert not v.ok
 
+    def test_tail_truncation_of_one_record_is_detected(self, store):
+        # Regression: deleting the NEWEST record leaves a chain that is still internally
+        # consistent (every surviving link validates), so the hash walk alone reported
+        # "OK (N-1 records)". The durable high-water mark must catch it.
+        for i in range(5):
+            store.append_audit("decision", {"n": i})
+        conn = sqlite3.connect(store.path)
+        conn.execute("DELETE FROM audit WHERE seq=(SELECT MAX(seq) FROM audit)")
+        conn.commit()
+        conn.close()
+        v = store.verify_chain()
+        assert not v.ok
+        assert "tail truncation" in v.detail
+
+    def test_tail_truncation_of_k_records_is_detected(self, store):
+        for i in range(6):
+            store.append_audit("decision", {"n": i})
+        conn = sqlite3.connect(store.path)
+        # Delete the 3 newest records.
+        for _ in range(3):
+            conn.execute("DELETE FROM audit WHERE seq=(SELECT MAX(seq) FROM audit)")
+        conn.commit()
+        conn.close()
+        v = store.verify_chain()
+        assert not v.ok
+        assert "tail truncation" in v.detail
+        assert v.records == 3  # the survivors still verified before the mark caught it
+
+    def test_deleting_entire_tail_to_empty_is_detected(self, store):
+        for i in range(3):
+            store.append_audit("decision", {"n": i})
+        conn = sqlite3.connect(store.path)
+        conn.execute("DELETE FROM audit")
+        conn.commit()
+        conn.close()
+        v = store.verify_chain()
+        assert not v.ok
+        assert "tail truncation" in v.detail
+
+    def test_clean_chain_still_verifies_after_head_tracking(self, store):
+        for i in range(4):
+            store.append_audit("decision", {"n": i})
+        v = store.verify_chain()
+        assert v.ok and v.records == 4
+
     def test_read_audit_filters_by_kind(self, store):
         store.append_audit("decision", {"a": 1})
         store.append_audit("ingest", {"b": 2})

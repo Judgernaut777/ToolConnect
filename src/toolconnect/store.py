@@ -50,7 +50,16 @@ BASELINE_VERSION = 1
 #: The current schema version. A database at an older version is migrated forward on
 #: open (see ``_MIGRATIONS``); a database at a *newer* version is refused, because this
 #: code cannot know what a future migration changed.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+#: Meta keys recording the audit chain's durable high-water mark — the sequence number
+#: and record_hash of the newest record ever appended. They are updated inside the same
+#: transaction as every ``append_audit`` INSERT, so they cannot lag the chain. A chain
+#: whose actual tip is *behind* this mark has had its newest record(s) removed (tail
+#: truncation), which the hash walk alone cannot see because a truncated chain is still
+#: internally consistent. See ``verify_chain``.
+_AUDIT_HEAD_SEQ = "audit_head_seq"
+_AUDIT_HEAD_HASH = "audit_head_hash"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -108,10 +117,26 @@ CREATE TABLE IF NOT EXISTS audit (
 #: table scan into an index seek. Both are purely additive: no existing column changes,
 #: no row is rewritten, and the hash chain is untouched, so a migrated database verifies
 #: exactly as it did before.
+#: v3 (this release): a durable audit high-water mark, so that deleting the newest
+#: audit record(s) — tail truncation — is detectable. A truncated chain is internally
+#: consistent (every surviving link still validates), so the hash walk alone reports
+#: "OK (N-1 records)". Recording the max seq and tip hash in ``meta`` and comparing the
+#: actual tip against it closes that gap. The backfill below seeds the mark from the
+#: current tip of any existing chain, so a migrated database's untampered tip becomes
+#: its recorded head. Purely additive: two ``meta`` rows, no column or row is rewritten,
+#: and the hash chain itself is untouched, so a migrated database verifies as before.
+#: (An empty audit table selects no rows, so no head row is written — correct: an empty
+#: chain has no head to truncate to.)
 _MIGRATIONS: dict[int, list[str]] = {
     2: [
         "ALTER TABLE sources ADD COLUMN label TEXT",
         "CREATE INDEX IF NOT EXISTS idx_audit_kind ON audit(kind)",
+    ],
+    3: [
+        "INSERT OR REPLACE INTO meta(key, value) "
+        "SELECT 'audit_head_seq', CAST(seq AS TEXT) FROM audit ORDER BY seq DESC LIMIT 1",
+        "INSERT OR REPLACE INTO meta(key, value) "
+        "SELECT 'audit_head_hash', record_hash FROM audit ORDER BY seq DESC LIMIT 1",
     ],
 }
 
@@ -425,7 +450,19 @@ class SqliteStore:
             cur = self._conn.execute(
                 "INSERT INTO audit(kind, body, created_at, prev_hash, record_hash) "
                 "VALUES (?,?,?,?,?)", (kind, payload, created, prev, record_hash))
-            return int(cur.lastrowid)
+            seq = int(cur.lastrowid)
+            # Advance the durable high-water mark in the SAME transaction as the INSERT.
+            # If the process dies between the two, both roll back together; the mark can
+            # therefore never point past the chain, only ever match its true tip.
+            self._conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_AUDIT_HEAD_SEQ, str(seq)))
+            self._conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_AUDIT_HEAD_HASH, record_hash))
+            return seq
 
     def read_audit(self, kind: str | None = None, limit: int = 100) -> list[dict]:
         q = "SELECT seq, kind, body, created_at, record_hash FROM audit"
@@ -456,10 +493,16 @@ class SqliteStore:
     def verify_chain(self) -> ChainVerification:
         prev = _GENESIS
         count = 0
+        last_seq: int | None = None
+        last_hash = _GENESIS
         with self._lock:
             rows = self._conn.execute(
                 "SELECT seq, kind, body, created_at, prev_hash, record_hash "
                 "FROM audit ORDER BY seq").fetchall()
+            head_seq_row = self._conn.execute(
+                "SELECT value FROM meta WHERE key=?", (_AUDIT_HEAD_SEQ,)).fetchone()
+            head_hash_row = self._conn.execute(
+                "SELECT value FROM meta WHERE key=?", (_AUDIT_HEAD_HASH,)).fetchone()
         for seq, kind, body, created, prev_hash, record_hash in rows:
             if prev_hash != prev:
                 return ChainVerification(False, count, seq, "prev_hash mismatch")
@@ -468,5 +511,24 @@ class SqliteStore:
             if record_hash != expect:
                 return ChainVerification(False, count, seq, "record_hash mismatch")
             prev = record_hash
+            last_seq = seq
+            last_hash = record_hash
             count += 1
+        # High-water-mark check: the hash walk above proves every *surviving* record is
+        # internally consistent, but it cannot see records that were deleted off the tail
+        # — a truncated chain still validates end-to-end. Compare the actual tip against
+        # the durable mark recorded at append time. A tip behind the mark (fewer records,
+        # or a different tip hash) means the newest record(s) were removed or rewritten:
+        # tampered. Fail closed. Databases predating v3 with no mark skip this check
+        # (their tip cannot be reconstructed), preserving the prior behavior for them.
+        if head_seq_row is not None:
+            recorded_seq = int(head_seq_row[0])
+            recorded_hash = head_hash_row[0] if head_hash_row is not None else None
+            actual_seq = last_seq if last_seq is not None else 0
+            if actual_seq != recorded_seq or (
+                    recorded_hash is not None and last_hash != recorded_hash):
+                return ChainVerification(
+                    False, count, recorded_seq,
+                    f"tail truncation: recorded head seq {recorded_seq} "
+                    f"but chain ends at seq {actual_seq}")
         return ChainVerification(True, count)
