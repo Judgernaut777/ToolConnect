@@ -17,7 +17,16 @@ from . import mcp_source
 from .catalog import AmbiguousToolName, AssertionStatus  # noqa: F401  (re-export convenience)
 from .descriptor import ClaimedMetadata, TrustedSource, TrustTier
 from .policy import Broker, Decision, PolicyEngine, Principal
+from .schema import SchemaValidationError, validate_input_schema
 from .store import SqliteStore, asserted_from_json, asserted_to_json  # noqa: F401
+
+
+#: The versioned shape of an authorization Decision on the wire. Bumped only on a
+#: breaking change to the Decision JSON (a removed/renamed field or changed meaning);
+#: additive fields keep the same major. Clients compare the MAJOR component and fail
+#: closed on a mismatch (see ``toolconnect.client.ToolConnectClient``). Pinned by a
+#: golden contract fixture in ``tests/test_contract.py``.
+DECISION_CONTRACT_VERSION = "1.0"
 
 
 class ServiceError(Exception):
@@ -68,6 +77,7 @@ def _decision_payload(d: Decision, decision_id: str) -> dict:
         "determining_policies": list(d.determining_policies),
         "default_deny": d.is_default_deny,
         "errors": list(d.errors),
+        "contract_version": DECISION_CONTRACT_VERSION,
     }
 
 
@@ -273,6 +283,18 @@ class ToolConnectService:
             desc = asserted_from_json(_to_json(descriptor))
         except (KeyError, ValueError, TypeError) as exc:
             raise ServiceError(400, f"invalid descriptor: {exc!r}")
+        # Grant-time schema validation (deliverable 11): refuse to let an operator vouch
+        # for a tool whose own declared input contract is structurally incoherent. This
+        # inspects only the static schema shape, never runtime arguments — those are the
+        # caller's to validate, because ToolConnect is never in the data path.
+        existing = self.catalog.get(source_id, name)
+        if existing is not None:
+            try:
+                validate_input_schema(existing.input_schema)
+            except SchemaValidationError as exc:
+                raise ServiceError(
+                    422, f"cannot assert {source_id}:{name}: declared input_schema is "
+                         f"invalid ({exc})")
         try:
             tv = self.catalog.assert_descriptor(source_id, name, desc)
         except ValueError as exc:  # promotion is human-only: asserted_by required

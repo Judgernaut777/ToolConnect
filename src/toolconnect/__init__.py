@@ -28,17 +28,28 @@ from .descriptor import (
     TrustedSource,
     TrustTier,
 )
+from .client import (
+    ClientDecision,
+    ToolConnectClient,
+    ToolConnectDenied,
+    ToolConnectError,
+    ToolConnectUnavailable,
+)
 from .flow import FlowFinding, FlowReport, analyze_toolset
 from .mcp_source import DiscoveredTool, DiscoveryResult, McpDiscoveryError, discover
 from .policy import Broker, CedarPolicyEngine, Decision, PolicyEngine, Principal
-from .service import ServiceError, ToolConnectService
+from .schema import SchemaValidationError, validate_input_schema
+from .service import DECISION_CONTRACT_VERSION, ServiceError, ToolConnectService
 from .store import SqliteStore
 
 __all__ = [
     "AmbiguousToolName", "AssertedDescriptor", "AssertionRecord", "AssertionStatus",
-    "Broker", "Catalog", "CedarPolicyEngine", "ClaimedMetadata", "DataClass", "Decision",
-    "DiscoveredTool", "DiscoveryResult", "DriftReport", "Effect", "FlowFinding",
-    "FlowReport", "McpDiscoveryError", "PolicyEngine", "Principal", "ServiceError",
-    "SqliteStore", "ToolConnectService", "ToolId", "ToolRef", "ToolVersion", "TrustTier",
-    "TrustedSource", "analyze_toolset", "discover",
+    "Broker", "Catalog", "CedarPolicyEngine", "ClaimedMetadata", "ClientDecision",
+    "DECISION_CONTRACT_VERSION", "DataClass", "Decision", "DiscoveredTool",
+    "DiscoveryResult", "DriftReport", "Effect", "FlowFinding", "FlowReport",
+    "McpDiscoveryError", "PolicyEngine", "Principal", "SchemaValidationError",
+    "ServiceError", "SqliteStore", "ToolConnectClient", "ToolConnectDenied",
+    "ToolConnectError", "ToolConnectService", "ToolConnectUnavailable", "ToolId",
+    "ToolRef", "ToolVersion", "TrustTier", "TrustedSource", "analyze_toolset",
+    "discover", "validate_input_schema",
 ]
