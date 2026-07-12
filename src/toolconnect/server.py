@@ -16,9 +16,12 @@ tool"; the caller performs the call itself and closes the loop via
 
 from __future__ import annotations
 
+import hmac
 import json
 import re
 import threading
+import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -30,6 +33,43 @@ DEFAULT_PORT = 8095
 _MAX_BODY = 1 << 20  # 1 MiB — descriptors and principals, not payloads
 
 
+class _RateLimiter:
+    """A fixed-window per-client request limiter.
+
+    Non-local deployments need a cheap availability guard so a fail-closed decision
+    point cannot be trivially exhausted. This keeps a bounded sliding window of recent
+    request timestamps per client key (remote IP) and rejects once the window is full.
+    Off by default (``per_window <= 0`` disables it); loopback-only deployments do not
+    need it and pay nothing.
+    """
+
+    def __init__(self, per_window: int, window_seconds: float = 60.0) -> None:
+        self.per_window = per_window
+        self.window = window_seconds
+        self._hits: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def enabled(self) -> bool:
+        return self.per_window > 0
+
+    def check(self, key: str, now: float | None = None) -> tuple[bool, float]:
+        """Return ``(allowed, retry_after_seconds)``. Records the hit when allowed."""
+        if not self.enabled:
+            return True, 0.0
+        now = time.monotonic() if now is None else now
+        cutoff = now - self.window
+        with self._lock:
+            dq = self._hits.setdefault(key, deque())
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            if len(dq) >= self.per_window:
+                retry = self.window - (now - dq[0])
+                return False, max(0.0, retry)
+            dq.append(now)
+            return True, 0.0
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "toolconnect"
     protocol_version = "HTTP/1.1"
@@ -37,22 +77,59 @@ class _Handler(BaseHTTPRequestHandler):
     # populated by make_server()
     service: ToolConnectService = None  # type: ignore[assignment]
     lock: threading.Lock = None  # type: ignore[assignment]
+    token: str | None = None
+    limiter: _RateLimiter = None  # type: ignore[assignment]
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: D102 — quiet by default
         pass
 
     # -- plumbing ---------------------------------------------------------------
 
-    def _json(self, status: int, payload) -> None:
+    def _json(self, status: int, payload, extra_headers: dict | None = None) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
-    def _error(self, status: int, message: str) -> None:
-        self._json(status, {"error": {"status": status, "message": message}})
+    def _error(self, status: int, message: str, extra_headers: dict | None = None) -> None:
+        self._json(status, {"error": {"status": status, "message": message}}, extra_headers)
+
+    def _client_key(self) -> str:
+        return self.client_address[0] if self.client_address else "unknown"
+
+    def _authenticated(self) -> bool:
+        """True when no token is required, or the presented bearer token matches.
+
+        Comparison is constant-time. When a token is configured, EVERY route requires
+        it — a fail-closed decision point does not leave its catalog, drift state, or
+        audit log readable to an unauthenticated caller. Loopback-only deployments
+        configure no token and this is a no-op.
+        """
+        if not self.token:
+            return True
+        header = self.headers.get("Authorization", "")
+        scheme, _, presented = header.partition(" ")
+        if scheme.lower() != "bearer" or not presented:
+            return False
+        return hmac.compare_digest(presented.strip(), self.token)
+
+    def _drain_body(self) -> None:
+        """Consume any request body so the keep-alive connection stays in sync.
+
+        A 401/429 rejection still has to read the bytes the client already sent, or the
+        next request on the same HTTP/1.1 connection would be misframed.
+        """
+        length = int(self.headers.get("Content-Length") or 0)
+        remaining = min(length, _MAX_BODY + 1)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
 
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -68,6 +145,20 @@ class _Handler(BaseHTTPRequestHandler):
         return parsed
 
     def _dispatch(self, method: str) -> None:
+        # Rate limiting first: an attacker who cannot authenticate should not even be
+        # able to make us do work proving it. Then authentication. Both precede routing.
+        if self.limiter is not None and self.limiter.enabled:
+            allowed, retry = self.limiter.check(self._client_key())
+            if not allowed:
+                self._drain_body()
+                self._error(429, "rate limit exceeded",
+                            {"Retry-After": str(int(retry) + 1)})
+                return
+        if not self._authenticated():
+            self._drain_body()
+            self._error(401, "missing or invalid bearer token",
+                        {"WWW-Authenticate": "Bearer"})
+            return
         url = urlparse(self.path)
         query = {k: v[-1] for k, v in parse_qs(url.query).items()}
         try:
@@ -162,15 +253,27 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def make_server(service: ToolConnectService, host: str = DEFAULT_HOST,
-                port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
+                port: int = DEFAULT_PORT, *, token: str | None = None,
+                rate_limit_per_min: int = 0) -> ThreadingHTTPServer:
+    """Build the HTTP server.
+
+    ``token``: when set, every request must present ``Authorization: Bearer <token>``.
+    Unset (the default, matching the loopback-only bind) leaves the surface open.
+    ``rate_limit_per_min``: requests per rolling 60 s window per client IP; ``0``
+    disables the limiter.
+    """
     handler = type("BoundHandler", (_Handler,), {
-        "service": service, "lock": threading.Lock()})
+        "service": service, "lock": threading.Lock(),
+        "token": token or None,
+        "limiter": _RateLimiter(rate_limit_per_min)})
     return ThreadingHTTPServer((host, port), handler)
 
 
 def serve(service: ToolConnectService, host: str = DEFAULT_HOST,
-          port: int = DEFAULT_PORT) -> None:
-    httpd = make_server(service, host, port)
+          port: int = DEFAULT_PORT, *, token: str | None = None,
+          rate_limit_per_min: int = 0) -> None:
+    httpd = make_server(service, host, port, token=token,
+                        rate_limit_per_min=rate_limit_per_min)
     try:
         httpd.serve_forever()
     finally:
