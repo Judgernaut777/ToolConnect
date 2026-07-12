@@ -211,6 +211,44 @@ Reproduce: `.venv/bin/python experiments/drift_experiment.py`.
 
 ---
 
+## 6b. Reference client & wiring (shipped)
+
+The seam above is a Protocol AgentConnect would own. To make adoption concrete without
+modifying AgentConnect, ToolConnect **ships a client library in its own repo**:
+`toolconnect.client.ToolConnectClient`. It is stdlib-only, importable, and fail-closed —
+a deny is a return value, but unreachable / non-200 / an incompatible decision-contract
+major *raises* (`ToolConnectUnavailable`) and never returns an allow. It has no `invoke`.
+
+Config surface (mirrors `LocalComputeProvider`'s connection config):
+
+```python
+from toolconnect.client import ToolConnectClient
+gov = ToolConnectClient.from_config({"base_url": "http://127.0.0.1:8095",
+                                     "token": os.environ["TOOLCONNECT_AUTH_TOKEN"]})
+# env fallback: TOOLCONNECT_URL / TOOLCONNECT_TOKEN / TOOLCONNECT_TIMEOUT
+```
+
+**AgentConnect-side wiring (for the lead).** Implement the `ToolGovernor` Protocol (§3)
+as a thin adapter holding a `ToolConnectClient`:
+
+* `authorize(principal, tool, args, ctx)` → `client.authorize({"id": principal.id,
+  "privacy_tier": principal.effective_tier(), "on_behalf_of": ...}, source_id, name,
+  ctx)`; map `ClientDecision.allowed`/`.default_deny`/`.determining_policies` onto
+  AgentConnect's `Decision`. In `required` mode, a raised `ToolConnectUnavailable` is a
+  workflow failure (a denial), never an allow — the client already refuses to fabricate
+  one.
+* `record(decision_id, outcome)` → `client.record_outcome(decision_id, outcome.status,
+  outcome.detail)`.
+* `resolve_toolset(...)` → not yet an HTTP route (see SERVICE.md *Known limits*);
+  advisory-mode callers cache the last good `/catalog` slice until it is exposed.
+* `health()` → `client.health()`.
+
+The `tools` field of a worker identity becomes the toolset the governor resolves; the
+delegation-chain intersection is already computed client-side via
+`Principal.effective_tier()` before the call. Nothing here imports AgentConnect, and
+AgentConnect need not import ToolConnect — it depends only on the Protocol it defines and
+this HTTP client. Proven against a live `toolconnect serve` in `demo_client_auth.py`.
+
 ## 7. What AgentConnect's maintainer is being asked to decide
 
 1. **Is a fail-closed seam acceptable** in a codebase whose every other adapter fails
