@@ -25,6 +25,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -41,7 +42,15 @@ from .descriptor import (
     TrustTier,
 )
 
-SCHEMA_VERSION = 1
+#: The oldest schema this code can open and upgrade from. RC1 (v0.1.0-rc1) shipped
+#: schema v1; the baseline DDL below IS that v1 shape, so a fresh database and a
+#: migrated legacy database converge on byte-identical structure.
+BASELINE_VERSION = 1
+
+#: The current schema version. A database at an older version is migrated forward on
+#: open (see ``_MIGRATIONS``); a database at a *newer* version is refused, because this
+#: code cannot know what a future migration changed.
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -88,6 +97,23 @@ CREATE TABLE IF NOT EXISTS audit (
     record_hash TEXT NOT NULL
 );
 """
+
+#: Forward-only migrations, keyed by the version they PRODUCE. Applied in ascending
+#: order for any stored version < SCHEMA_VERSION. Each statement must be additive and
+#: idempotent-safe under a single application (they run exactly once per version step,
+#: inside a transaction, and only when the stored version is strictly below the key).
+#:
+#: v2 (this release): an operator-facing display ``label`` on sources, and an index on
+#: ``audit(kind)`` that turns the kind-filtered audit reads and decision lookups from a
+#: table scan into an index seek. Both are purely additive: no existing column changes,
+#: no row is rewritten, and the hash chain is untouched, so a migrated database verifies
+#: exactly as it did before.
+_MIGRATIONS: dict[int, list[str]] = {
+    2: [
+        "ALTER TABLE sources ADD COLUMN label TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_audit_kind ON audit(kind)",
+    ],
+}
 
 _GENESIS = "0" * 64
 
@@ -185,12 +211,58 @@ class SqliteStore:
             row = self._conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'").fetchone()
             if row is None:
+                # Fresh database: the baseline DDL above created the v1 shape. Record
+                # v1, then run forward migrations so a new DB and an upgraded legacy DB
+                # converge on identical structure.
                 self._conn.execute(
                     "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
-                    (str(SCHEMA_VERSION),))
-            elif int(row[0]) != SCHEMA_VERSION:
+                    (str(BASELINE_VERSION),))
+                current = BASELINE_VERSION
+            else:
+                current = int(row[0])
+            if current > SCHEMA_VERSION:
+                # A database written by newer code. We cannot know what it changed, so
+                # refuse rather than risk misreading it — fail closed on schema too.
                 raise RuntimeError(
-                    f"database schema version {row[0]} != supported {SCHEMA_VERSION}")
+                    f"database schema version {current} != supported {SCHEMA_VERSION} "
+                    f"(newer than this build; refusing to open)")
+            if current < SCHEMA_VERSION:
+                self._migrate(current)
+        self.schema_version = SCHEMA_VERSION
+
+    def _migrate(self, from_version: int) -> None:
+        """Apply forward migrations in-place, from ``from_version`` up to current.
+
+        Runs inside the caller's transaction/lock. Each version step is applied atomically
+        and the recorded ``schema_version`` advances only after its statements succeed, so
+        an interrupted upgrade leaves the database at a known, still-openable version.
+        """
+        for target in range(from_version + 1, SCHEMA_VERSION + 1):
+            for statement in _MIGRATIONS.get(target, ()):
+                self._conn.execute(statement)
+            self._conn.execute(
+                "UPDATE meta SET value=? WHERE key='schema_version'", (str(target),))
+
+    def backup(self, dest_path: str | Path) -> str:
+        """Write a consistent snapshot of the database to ``dest_path``.
+
+        Uses SQLite's online-backup API, which produces a transactionally consistent
+        copy even while other threads are writing — no need to quiesce the service. The
+        copy is a complete, openable ToolConnect database (schema + catalog + audit
+        chain). Restore is simply opening (or moving into place) the resulting file;
+        the round trip preserves the hash chain byte-for-byte, so a restored backup
+        verifies. Returns the destination path.
+        """
+        dest_path = str(dest_path)
+        if dest_path != ":memory:":
+            Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+        dest = sqlite3.connect(dest_path)
+        try:
+            with self._lock:
+                self._conn.backup(dest)
+        finally:
+            dest.close()
+        return dest_path
 
     def close(self) -> None:
         with self._lock:
@@ -286,12 +358,19 @@ class SqliteStore:
                 cat.sources[sid] = TrustedSource(
                     source_id=sid, tier=TrustTier(tier), transport=transport)
                 cat.declared[sid] = set(json.loads(declared))
+            # Load tools with their claim and schema, but NOT their asserted state yet.
+            # Assertion validity is re-derived below from the fingerprint, never trusted
+            # from the stored `asserted` column — so a tampered database (an `asserted`
+            # column edited to inject an authorization, or a claim edited underneath a
+            # standing assertion) cannot resurrect invocability. This mirrors the
+            # in-memory ingest rule (assert stands iff the claim fingerprint matches) so
+            # hydration and ingest agree, and it fails closed on any inconsistency.
             for sid, name, version, claimed, asserted, schema in self._conn.execute(
                     "SELECT source_id, name, version, claimed, asserted, input_schema FROM tools"):
                 cat.tools[(sid, name)] = ToolVersion(
                     ref=ToolRef(name, version), source_id=sid,
                     claimed=claimed_from_json(claimed),
-                    asserted=asserted_from_json(asserted) if asserted is not None else None,
+                    asserted=None,
                     input_schema=json.loads(schema))
             for sid, name, descriptor, fingerprint in self._conn.execute(
                     "SELECT source_id, name, descriptor, fingerprint FROM assertions"):
@@ -299,7 +378,37 @@ class SqliteStore:
                 cat._assertions[tid] = AssertionRecord(
                     descriptor=asserted_from_json(descriptor),
                     fingerprint=int(fingerprint))
+            # An assertion carries over ONLY when the persisted evidence's fingerprint
+            # matches the tool's current claim. A mismatch (a rug-pull, or tampering)
+            # leaves the tool unasserted — CHANGED, not ASSERTED.
+            for tid, record in cat._assertions.items():
+                tv = cat.tools.get(tid)
+                if tv is not None and cat._fingerprint(tv) == record.fingerprint:
+                    cat.tools[tid] = replace(tv, asserted=record.descriptor)
         return cat
+
+    def verify_assertions(self) -> dict:
+        """Cross-check every persisted assertion against its tool's current claim.
+
+        Returns ``{"ok": bool, "checked": int, "mismatches": [{source_id, name,
+        stored_fingerprint, actual_fingerprint}]}``. A mismatch means either the server
+        redefined the tool after it was vouched for (a rug-pull that ``ingest`` would
+        catch live) or the database was tampered with. Either way the tool is not
+        currently invocable, and this is the operator-facing integrity probe for it.
+        """
+        cat = self.load_catalog()
+        mismatches = []
+        for tid, record in cat._assertions.items():
+            tv = cat.tools.get(tid)
+            actual = cat._fingerprint(tv) if tv is not None else None
+            if actual != record.fingerprint:
+                mismatches.append({
+                    "source_id": tid[0], "name": tid[1],
+                    "stored_fingerprint": str(record.fingerprint),
+                    "actual_fingerprint": None if actual is None else str(actual),
+                })
+        return {"ok": not mismatches, "checked": len(cat._assertions),
+                "mismatches": mismatches}
 
     # -- audit ----------------------------------------------------------------------
 
