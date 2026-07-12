@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased — production hardening (from v0.1.0-rc1)
+
+Hardening pass for the Connect production-readiness program. ToolConnect is still a
+decision-and-governance point: no `invoke`/`execute`/`route` was added and the negative
+contract is still tested end-to-end. Gate: **322 passed, 2 skipped** (288 passed / 36
+skipped under the offline `unshare -rn` variant). Rationale in
+`docs/adr/0001-production-hardening.md`.
+
+### Added
+
+* **Bearer-token auth + rate limiting** on the HTTP surface (`toolconnect.server`):
+  off by default (loopback-open), required for every route when a token is configured;
+  `401` + `WWW-Authenticate` on failure, constant-time compare. Fixed-window per-IP rate
+  limiter (`--rate-limit`, `429` + `Retry-After`), checked before auth. `serve` refuses
+  a non-loopback bind with no token. TLS-termination guidance in docs/SERVICE.md.
+* **Reference client library** (`toolconnect.client.ToolConnectClient`): stdlib-only,
+  importable, fail-closed (deny is a value; unreachable/non-200/incompatible-contract
+  raises, never allows), no `invoke`. Config surface `base_url`/`token`/`timeout` with
+  env fallback. AgentConnect-side wiring documented in docs/AGENTCONNECT_CONTRACT.md.
+* **Versioned decision contract**: every Decision carries `contract_version` (`"1.0"`);
+  clients fail closed on an unknown major. Golden fixture pins the shape
+  (`tests/test_contract.py`).
+* **Grant-time `input_schema` validation** (`toolconnect.schema`): an operator cannot
+  assert a tool whose declared schema is structurally incoherent (`422`). The
+  validate-vs-caller boundary is documented; argument validation stays the caller's job.
+* **Backup / restore / migration** (`toolconnect.store`): `backup()` via SQLite's online
+  backup (consistent under live writes); forward-only schema migrations on open (RC1 v1
+  → current v2, additive, chain-preserving) with newer-than-build databases refused.
+* **Operator CLI**: `verify-audit` (exit 1 on a broken chain), `drift` (exit 2 on drift),
+  `backup`, `audit`.
+* **Second real MCP server fixture** (`fixtures/db_mcp_server.py`): discovery,
+  namespacing, and all six transport-fault classes now proven against two independent
+  real stdio servers that collide on one bare name.
+* **`SqliteStore.verify_assertions()`**: operator integrity probe cross-checking each
+  persisted assertion's fingerprint against its tool's current claim.
+* ~90 new tests across concurrency, multi-server, auth/rate-limit, client, contract,
+  schema validation, backup/migration, cross-process assertion tamper, and CLI ops.
+
+### Changed
+
+* **Hydration re-derives assertion validity from the SHA-256 fingerprint** rather than
+  trusting the persisted `asserted` column — a rug-pull or direct DB edit leaves a tool
+  non-invocable (`asserted_then_changed`). Fail-closed on tampering, proven cross-process.
+
 ## 0.1.0 — 2026-07-12
 
 First release with a runtime. ToolConnect remains a decision and governance point:

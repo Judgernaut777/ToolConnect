@@ -79,7 +79,8 @@ Errors are `{"error": {"status": N, "message": "..."}}`.
   "reason": "forbidden by no-sensitive-reads-for-rented",
   "determining_policies": ["no-sensitive-reads-for-rented"],
   "default_deny": false,
-  "errors": []
+  "errors": [],
+  "contract_version": "1.0"
 }
 ```
 
@@ -88,6 +89,13 @@ Errors are `{"error": {"status": N, "message": "..."}}`.
 explicit `forbid`. A denial is returned as HTTP `200`: it is a decision, not an error.
 Requests that cannot be evaluated at all (unknown tool, unregistered source) are also
 decisions — recorded, denied, explained.
+
+`contract_version` is the versioned shape of the Decision itself. The **major** component
+is a compatibility signal: an additive field keeps the major, a removed/renamed field or
+a changed meaning bumps it. A client that does not recognize the major must **fail closed**
+(treat it as unavailable), never guess. `toolconnect.client.ToolConnectClient` does exactly
+this. The exact key set is pinned by a golden fixture (`tests/test_contract.py`), so the
+shape cannot drift silently.
 
 `principal` is `{id, privacy_tier?, kind?, on_behalf_of?}` and `on_behalf_of` nests
 recursively; authority is the intersection of the delegation chain
@@ -112,9 +120,15 @@ paginated `tools/list`. Server annotations (`readOnlyHint`, `destructiveHint`,
 `idempotentHint`, `openWorldHint`) are normalized into `ClaimedMetadata` — recorded,
 diffed, never consulted for policy. There is no `tools/call` in the adapter, by design.
 
-`fixtures/mini_mcp_server.py` is a real stdlib MCP server used by the test suite, with
-fault modes (`--mode malformed|truncate|hang|dup|partial|slowinit|empty`) so transport
-faults are produced on a real wire rather than by monkeypatching.
+`fixtures/mini_mcp_server.py` and `fixtures/db_mcp_server.py` are **two** independent
+real stdlib MCP servers used by the test suite, with different tool sets and server
+identities and the same fault modes (`--mode malformed|truncate|hang|dup|partial|
+slowinit|empty`) so transport faults are produced on a real wire rather than by
+monkeypatching. They overlap on one bare name (`fetch_url`) on purpose: it forces a
+cross-source collision, proving namespaced `(source_id, name)` identity keeps the two
+distinct and that bare-name resolution fails closed on the ambiguity. Discovery,
+normalization, and all six fault classes are exercised against both
+(`tests/test_multi_server.py`, `demo_multi_server.py`).
 
 ## Amendments over the Phase 1 prototype
 
@@ -123,19 +137,99 @@ faults are produced on a real wire rather than by monkeypatching.
    now uses SHA-256 over a canonical encoding. Semantics are unchanged (fingerprints are
    equal iff the `(version, claim)` tuples are equal) and the change is proven
    cross-process in `tests/test_store.py::TestFingerprintStability`.
-2. **`input_schema` is carried through ingest** onto the persisted `ToolVersion`. It is
-   stored and served, not yet validated at authorization time (ARCHITECTURE §2.3's
-   grant-time schema validation remains future work).
+2. **`input_schema` is carried through ingest** onto the persisted `ToolVersion`, and is
+   **validated for structural coherence at grant (assertion) time** (see *Schema
+   validation boundary* below). Argument-vs-schema validation at call time remains the
+   caller's responsibility — ToolConnect is never in the data path.
 3. **`decision_id` and outcome recording.** Every Broker audit record gains a
    `decision_id` so the contract's `record()` loop closure has something to reference.
    The Broker itself is unmodified; the id is attached by the persistence layer.
 
+## Non-local deployment (auth, rate limiting, TLS)
+
+The default bind is loopback with an open surface — correct for a co-located decision
+point, unsafe anywhere else. For a reachable deployment:
+
+* **Bearer-token auth.** Set a token via `$TOOLCONNECT_AUTH_TOKEN` (or `token` in the
+  config, or name a different env var with `--token-env NAME`). When a token is set,
+  **every** route requires `Authorization: Bearer <token>` (constant-time compared);
+  a missing/wrong token is `401` with `WWW-Authenticate: Bearer`. The token is never a
+  bare flag — argv is visible in `ps`. `serve` **refuses to bind a non-loopback host
+  with no token**: bind `127.0.0.1`, or set a token. `/health` is *not* exempt — the
+  catalog and audit state are sensitive; probe liveness over loopback or via the proxy.
+* **Rate limiting.** `--rate-limit N` (or `rate_limit_per_min` in config) caps requests
+  per rolling 60 s window per client IP; over the cap is `429` with `Retry-After`. `0`
+  (default) disables it. It is a backstop — do primary rate limiting at the proxy.
+* **TLS is terminated by a reverse proxy** (nginx/Caddy/a cloud LB), never in-process.
+  Put ToolConnect on loopback (or a private interface) behind the proxy, which
+  terminates TLS and forwards to it. The stdlib server does not and will not do its own
+  TLS. Prove auth end-to-end: `demo_client_auth.py`.
+
+## Concurrency & durability
+
+One process, one writer. `SqliteStore` holds a single connection and serializes every
+mutation behind one re-entrant lock, so concurrent callers cannot interleave a partial
+write — in particular the audit log's *read-prev-hash → insert* is atomic, which is what
+keeps the hash chain intact under load. `journal_mode=WAL` lets separate reader
+connections read while the writer is mid-burst without blocking or erroring. The HTTP
+server is threaded and additionally serializes request handling behind a per-server lock.
+Proven with real threads (and concurrent HTTP clients) in `tests/test_concurrency.py`
+and `demo_persistence.py`. This is a single-box story: there is no multi-writer or
+multi-node coordination, by design (ARCHITECTURE §4.8).
+
+## Schema validation boundary
+
+**ToolConnect validates the *shape of a tool's declared schema*; the caller validates
+*arguments*.** At grant (assertion) time, `toolconnect.schema.validate_input_schema`
+checks that the tool's declared `input_schema` is a structurally coherent JSON Schema —
+an object, with a `properties` that is an object, a `required` that lists names present
+in `properties`, and a known top-level `type`. An incoherent schema makes the assertion
+fail with `422`: an operator cannot vouch for a tool whose own input contract is broken.
+ToolConnect does **not** validate a call's arguments against the schema — it never sees
+the arguments, because it is never in the data path. Argument validation is the invoking
+runtime's job (ARCHITECTURE §5/§8). See `demo_ops.py`.
+
+## Backup, restore, and migration
+
+* **Backup:** `toolconnect backup --db X --out Y` writes a transactionally consistent
+  snapshot via SQLite's online-backup API — safe against a live service, no quiesce
+  needed. The command re-opens the copy and verifies its audit chain before reporting
+  success.
+* **Restore:** open (or move into place) the snapshot. It is a complete, governing
+  database; the hash chain round-trips byte-for-byte, so a restored backup verifies.
+* **Migration:** the store migrates a legacy database forward on open. The baseline is
+  the RC1 (schema v1) shape, so a fresh database and a migrated legacy one converge on
+  identical structure. Migrations are additive and leave the hash chain untouched; a
+  database at a version **newer** than the running build is refused, not opened.
+
+Proven in `tests/test_backup_migration.py` and `demo_persistence.py`.
+
+## Operator CLI
+
+Beyond `serve` and `init-db`, for operators and cron jobs (all read a `--db`, exit
+non-zero on a finding so they can gate a pipeline):
+
+| Command | Purpose |
+|---|---|
+| `toolconnect verify-audit --db X` | walk the hash chain; exit `1` if broken (tamper/loss detection) |
+| `toolconnect drift --db X --source SID` | drift vs. the last discovery; exit `2` if drift exists |
+| `toolconnect backup --db X --out Y` | consistent snapshot; verifies the copy |
+| `toolconnect audit --db X [--kind K] [--limit N]` | print recent audit records, newest first |
+
+## Reference client
+
+`toolconnect.client.ToolConnectClient` is a stdlib-only, importable, fail-closed client
+for a running service — the artifact AgentConnect adopts. Config surface: `base_url`,
+`token`, `timeout`, with env fallback (`TOOLCONNECT_URL`/`TOOLCONNECT_TOKEN`/
+`TOOLCONNECT_TIMEOUT`) via `ToolConnectClient.from_config(...)`. A deny is a normal
+return value; unreachable / non-200 / incompatible-contract raises rather than returning
+an allow. There is no `invoke`. See `docs/AGENTCONNECT_CONTRACT.md` → *Reference client
+& wiring* and `demo_client_auth.py`.
+
 ## Known limits (0.1.0)
 
-* **No authentication on the HTTP surface.** Loopback bind is the only guard. Do not
-  expose it beyond localhost; token auth is a pre-adoption requirement for the
-  AgentConnect integration.
-* One process, one writer. WAL SQLite; no coordination story beyond the internal lock.
 * `resolve_toolset` / ToolsetPack (contract §3) is not yet an HTTP route; toolset flow
   analysis exists in the library (`analyze_toolset`) but is not exposed.
-* Health probing (ARCHITECTURE §4.6) is not implemented; drift uses the last discovery.
+* Active health probing (ARCHITECTURE §4.6) is not implemented; drift uses the last
+  discovery observation.
+* Single box: no multi-writer or multi-node coordination beyond the internal lock + WAL.

@@ -14,3 +14,16 @@ policies = "examples/policies.cedar"
 # decision point on a public interface is an operator decision, not a default.
 host = "127.0.0.1"
 port = 8095
+
+# --- Non-local deployment (see docs/SERVICE.md → Non-local deployment) ---------
+#
+# Bearer-token auth. When a token is present, EVERY route requires
+# `Authorization: Bearer <token>`. Prefer supplying it via an environment variable
+# (argv is visible in `ps`); `token_env` names that variable. Binding a non-loopback
+# `host` with no token is refused.
+token_env = "TOOLCONNECT_AUTH_TOKEN"
+# token = "inline-only-if-you-must"   # env var (above) takes precedence
+
+# Requests per rolling 60 s window per client IP; 0 disables the limiter. A backstop —
+# do primary rate limiting and TLS termination at the reverse proxy in front of this.
+rate_limit_per_min = 0
