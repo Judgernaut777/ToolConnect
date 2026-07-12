@@ -55,7 +55,7 @@ def _cmd_init_db(args) -> int:
 
 def _cmd_serve(args) -> int:
     from .policy import CedarPolicyEngine
-    from .server import DEFAULT_HOST, DEFAULT_PORT, serve
+    from .server import DEFAULT_HOST, DEFAULT_PORT, LOOPBACK_HOSTS, serve
     from .service import ToolConnectService
     from .store import SqliteStore
 
@@ -78,7 +78,7 @@ def _cmd_serve(args) -> int:
         raise SystemExit(
             "serve requires --policies FILE (or `policies` in --config); "
             "a decision point must be told its policy set explicitly")
-    if host not in ("127.0.0.1", "::1", "localhost") and not token:
+    if host not in LOOPBACK_HOSTS and not token:
         # A non-loopback bind with no token would put a fail-closed decision point on a
         # reachable interface with an open surface. Refuse; make the operator choose.
         raise SystemExit(
@@ -282,7 +282,15 @@ def main(argv: list[str] | None = None) -> int:
     p_audit.set_defaults(func=_cmd_audit)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    from .store import SchemaTooNewError
+    try:
+        return args.func(args)
+    except SchemaTooNewError as exc:
+        # A newer-than-build database fails closed correctly; turn the store's
+        # RuntimeError into one actionable line at the CLI boundary rather than dumping
+        # a traceback on the operator. Any store-opening subcommand routes through here.
+        print(f"error: {exc} (database: {exc.path})", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -167,3 +167,56 @@ class TestRegistryCannotBeCrashed:
         # See docs/VERIFICATION.md, Security section.
         import toolconnect
         assert not any("sign" in n.lower() for n in dir(toolconnect))
+
+
+class TestServerBindRefusesUnauthenticatedNonLoopback:
+    """A non-loopback bind with no token must be refused at the library boundary
+    (``make_server``/``serve``), not only in the CLI. A programmatic embedder that
+    calls ``serve(host="0.0.0.0")`` with no token would otherwise put an open,
+    fail-closed decision point on a reachable interface. Defense in depth."""
+
+    def _service(self, tmp_path):
+        from toolconnect.service import ToolConnectService
+        from toolconnect.store import SqliteStore
+        return ToolConnectService(SqliteStore(tmp_path / "tc.db"),
+                                  CedarPolicyEngine(BASIC_CEDAR))
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.10", ""])
+    def test_non_loopback_without_token_is_refused(self, tmp_path, host):
+        from toolconnect.server import make_server
+        svc = self._service(tmp_path)
+        with pytest.raises(ValueError) as exc:
+            make_server(svc, host=host, port=0, token=None)
+        # One actionable message naming the offending host and the loopback remedy.
+        assert "loopback" in str(exc.value)
+        assert repr(host) in str(exc.value)
+
+    def test_serve_entry_path_also_refuses(self, tmp_path):
+        # The refusal must hold via serve(), the path an embedder actually calls, so it
+        # can never reach serve_forever() on an open non-loopback surface.
+        from toolconnect.server import serve
+        svc = self._service(tmp_path)
+        with pytest.raises(ValueError):
+            serve(svc, host="0.0.0.0", port=0, token=None)
+
+    def test_non_loopback_with_token_is_allowed(self, tmp_path):
+        from toolconnect.server import make_server
+        svc = self._service(tmp_path)
+        httpd = make_server(svc, host="0.0.0.0", port=0, token="a-real-token")
+        try:
+            assert httpd is not None
+        finally:
+            httpd.server_close()
+
+    @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+    def test_loopback_without_token_is_allowed(self, tmp_path, host):
+        from toolconnect.server import make_server
+        svc = self._service(tmp_path)
+        try:
+            httpd = make_server(svc, host=host, port=0, token=None)
+        except OSError:
+            pytest.skip(f"cannot bind {host} in this environment")
+        try:
+            assert httpd is not None
+        finally:
+            httpd.server_close()

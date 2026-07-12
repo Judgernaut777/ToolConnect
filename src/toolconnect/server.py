@@ -30,6 +30,13 @@ from .service import ServiceError, ToolConnectService
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8095
 
+#: Hosts that keep the surface off the network. A bind to anything else exposes the
+#: decision point on a reachable interface, so it must carry a bearer token. Shared by
+#: the CLI's pre-flight check and enforced again in :func:`make_server` (defense in
+#: depth: no entry path — CLI, embedder, or test — can open an authenticated-optional
+#: surface on a non-loopback interface).
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
 _MAX_BODY = 1 << 20  # 1 MiB — descriptors and principals, not payloads
 
 
@@ -261,7 +268,16 @@ def make_server(service: ToolConnectService, host: str = DEFAULT_HOST,
     Unset (the default, matching the loopback-only bind) leaves the surface open.
     ``rate_limit_per_min``: requests per rolling 60 s window per client IP; ``0``
     disables the limiter.
+
+    A non-loopback ``host`` with no ``token`` is refused here — not only in the CLI —
+    so a programmatic embedder cannot bind an open, unauthenticated decision point on a
+    reachable interface via ``make_server``/``serve``.
     """
+    if host not in LOOPBACK_HOSTS and not token:
+        raise ValueError(
+            f"refusing to bind {host!r} without authentication: a non-loopback bind "
+            f"exposes an open decision point on a reachable interface. Supply a token, "
+            f"or bind a loopback host ({', '.join(sorted(LOOPBACK_HOSTS))}).")
     handler = type("BoundHandler", (_Handler,), {
         "service": service, "lock": threading.Lock(),
         "token": token or None,
