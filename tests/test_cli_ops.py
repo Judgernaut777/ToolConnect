@@ -73,6 +73,23 @@ class TestVerifyAuditCli:
         conn.commit(); conn.close()
         assert main(["verify-audit", "--db", db]) == 1
 
+    def test_tail_truncation_is_detected(self, db, capsys):
+        # Regression: the exact original repro — delete the newest record(s). Before the
+        # high-water mark, verify-audit returned 0 "audit chain OK (N-1 records)".
+        conn = sqlite3.connect(db)
+        conn.execute("DELETE FROM audit WHERE seq=(SELECT MAX(seq) FROM audit)")
+        conn.commit(); conn.close()
+        rc = main(["verify-audit", "--db", db])
+        assert rc == 1
+        assert "BROKEN" in capsys.readouterr().out
+
+    def test_multi_record_tail_truncation_is_detected(self, db):
+        conn = sqlite3.connect(db)
+        for _ in range(2):
+            conn.execute("DELETE FROM audit WHERE seq=(SELECT MAX(seq) FROM audit)")
+        conn.commit(); conn.close()
+        assert main(["verify-audit", "--db", db]) == 1
+
 
 class TestDriftCli:
     def test_drift_reports_and_exits_two(self, db, capsys):

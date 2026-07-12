@@ -65,6 +65,23 @@ class TestBackupRestore:
         assert rsvc.authorize({"id": "a"}, "s", "reader")["allowed"] is True
         restored.close()
 
+    def test_backup_round_trip_preserves_tail_truncation_detection(self, tmp_path):
+        # The high-water mark travels with the online-backup snapshot, so a restored
+        # backup must still catch a tail truncation applied AFTER restore.
+        store, svc = _populated_service(tmp_path / "live.db")
+        dest = store.backup(tmp_path / "backup.db")
+        store.close()
+        restored = SqliteStore(dest)
+        assert restored.verify_chain().ok
+        restored.close()
+        conn = sqlite3.connect(dest)
+        conn.execute("DELETE FROM audit WHERE seq=(SELECT MAX(seq) FROM audit)")
+        conn.commit(); conn.close()
+        reopened = SqliteStore(dest)
+        v = reopened.verify_chain()
+        assert not v.ok and "tail truncation" in v.detail
+        reopened.close()
+
     def test_backup_is_consistent_during_concurrent_writes(self, tmp_path):
         """The online-backup snapshot verifies even while another thread writes."""
         import threading
@@ -162,6 +179,42 @@ class TestMigration:
         assert chain.records == health["audit_records"]
         assert migrated.has_source("s")
         migrated.close()
+
+    def test_migration_backfills_head_and_detects_later_truncation(self, tmp_path):
+        # A pre-v3 database (populated, no high-water mark) must, on migration, seed the
+        # mark from its current tip — the untampered chain still verifies — and then
+        # detect a tail truncation applied afterward.
+        store, svc = _populated_service(tmp_path / "src.db")
+        store.close()
+
+        rows = sqlite3.connect(tmp_path / "src.db").execute(
+            "SELECT kind, body, created_at, prev_hash, record_hash FROM audit ORDER BY seq"
+        ).fetchall()
+        assert len(rows) >= 3
+
+        legacy = tmp_path / "legacy_v2.db"
+        c = sqlite3.connect(legacy)
+        c.executescript(_SCHEMA)
+        c.execute("INSERT INTO meta(key, value) VALUES ('schema_version','2')")
+        c.execute("INSERT INTO sources(source_id, tier, transport, declared, command, "
+                  "registered_at) VALUES ('s','known','mcp','[]',NULL,'t0')")
+        c.executemany(
+            "INSERT INTO audit(kind, body, created_at, prev_hash, record_hash) "
+            "VALUES (?,?,?,?,?)", rows)
+        c.commit(); c.close()
+
+        migrated = SqliteStore(legacy)
+        assert migrated.schema_version == SCHEMA_VERSION
+        assert migrated.verify_chain().ok  # backfilled head matches the untampered tip
+        migrated.close()
+
+        conn = sqlite3.connect(legacy)
+        conn.execute("DELETE FROM audit WHERE seq=(SELECT MAX(seq) FROM audit)")
+        conn.commit(); conn.close()
+        reopened = SqliteStore(legacy)
+        v = reopened.verify_chain()
+        assert not v.ok and "tail truncation" in v.detail
+        reopened.close()
 
     def test_reopen_after_migration_is_a_noop(self, tmp_path):
         legacy = tmp_path / "legacy.db"
