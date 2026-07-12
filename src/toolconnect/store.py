@@ -52,6 +52,24 @@ BASELINE_VERSION = 1
 #: code cannot know what a future migration changed.
 SCHEMA_VERSION = 3
 
+
+class SchemaTooNewError(RuntimeError):
+    """A database was written by a newer build than this one and cannot be opened.
+
+    Raised on open when the stored schema version exceeds :data:`SCHEMA_VERSION`. It is
+    a ``RuntimeError`` subclass so existing broad handlers still catch it, while giving
+    the CLI a precise type to turn into one clean, actionable line instead of a
+    traceback. ``current``/``supported``/``path`` carry the fields a message needs.
+    """
+
+    def __init__(self, current: int, supported: int, path: str) -> None:
+        self.current = current
+        self.supported = supported
+        self.path = path
+        super().__init__(
+            f"database schema version {current} != supported {supported} "
+            f"(newer than this build; refusing to open)")
+
 #: Meta keys recording the audit chain's durable high-water mark — the sequence number
 #: and record_hash of the newest record ever appended. They are updated inside the same
 #: transaction as every ``append_audit`` INSERT, so they cannot lag the chain. A chain
@@ -248,9 +266,7 @@ class SqliteStore:
             if current > SCHEMA_VERSION:
                 # A database written by newer code. We cannot know what it changed, so
                 # refuse rather than risk misreading it — fail closed on schema too.
-                raise RuntimeError(
-                    f"database schema version {current} != supported {SCHEMA_VERSION} "
-                    f"(newer than this build; refusing to open)")
+                raise SchemaTooNewError(current, SCHEMA_VERSION, str(self.path))
             if current < SCHEMA_VERSION:
                 self._migrate(current)
         self.schema_version = SCHEMA_VERSION

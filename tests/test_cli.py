@@ -61,6 +61,31 @@ class TestCli:
         assert "Traceback" not in out.stderr
         assert str(bad) in out.stderr
 
+    def test_store_subcommand_refuses_a_newer_than_build_db_cleanly(self, tmp_path):
+        """A database written by a newer build fails closed (exit 1) with one clean,
+        actionable line — never a raw Python traceback dumped on the operator."""
+        import sqlite3
+
+        from toolconnect.store import SCHEMA_VERSION
+
+        db = tmp_path / "tc.db"
+        assert _run("init-db", "--db", str(db)).returncode == 0
+        # Forge a database from the future: bump the recorded schema version past what
+        # this build supports, exactly as a newer release's migration would leave it.
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE meta SET value=? WHERE key='schema_version'",
+                     (str(SCHEMA_VERSION + 1),))
+        conn.commit()
+        conn.close()
+
+        out = _run("verify-audit", "--db", str(db))
+        assert out.returncode == 1, out.stderr
+        assert "Traceback" not in out.stderr
+        # One actionable line: what went wrong and which database.
+        assert "newer than this build" in out.stderr
+        assert str(db) in out.stderr
+        assert out.stderr.strip().count("\n") == 0
+
 
 class TestExamples:
     def test_example_policy_set_parses(self):
