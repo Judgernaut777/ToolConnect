@@ -59,8 +59,12 @@ constraint shapes most of the architecture.
 | **Permissions** | The principal model: who is asking, on whose behalf, under what delegation. |
 | **Policy** | The decision: allow, deny, or allow-with-constraints — with a machine-readable reason. |
 | **Health** | Liveness, readiness, degradation, circuit state. Per tool, not just per server. |
-| **Invocation brokerage** | Admission control and grant issuance. See the boundary note below. |
+| **Invocation brokerage**¹ | Admission control and grant issuance. See the boundary note below. |
 | **Audit** | A tamper-evident record of every decision, including the denials. |
+
+¹ "Brokerage" here means authorization/decision brokering — issuing a grant or denial — not
+in-path invocation proxying. ToolConnect never sits on the invocation data path; see
+"The brokerage boundary" below.
 
 ## What ToolConnect does not own
 
@@ -74,7 +78,14 @@ constraint shapes most of the architecture.
 
 And three hard constraints on scope:
 
-1. **No runtime implementation.** This repository is design work.
+> **SUPERSEDED (2026-07-17):** constraint 1 below was written pre-runtime. As of 0.1.0 there
+> **is** a runtime — a daemon (`toolconnect serve`), SQLite persistence, an HTTP service, an MCP
+> stdio adapter, and an installable wheel + CLI (see the top of this README and
+> [docs/STATUS.md](docs/STATUS.md)). Constraints 2 and 3 still hold. Retained as historical
+> design intent.
+
+1. **No runtime implementation.** ~~This repository is design work.~~ *(Historical — a v0.1.0
+   runtime now ships; see the note above.)*
 2. **No MCP replacement.** ToolConnect speaks MCP as a client and may expose an MCP server
    adapter. It does not compete with, fork, or extend the protocol.
 3. **No tool execution engine.** ToolConnect never runs a tool.
@@ -126,12 +137,18 @@ runtime, or the transports. Each of them is replaceable behind an adapter.
 
 ## The prototype
 
-`src/toolconnect/` is a **Phase 1 validation prototype**, not the product. In-memory only: no
-daemon, no database, no HTTP service, no tool execution.
+> **SUPERSEDED (2026-07-17):** this section describes the original Phase 1 validation prototype.
+> As of 0.1.0 `src/toolconnect/` **is** the product runtime: it has a daemon, SQLite persistence,
+> and an HTTP service (the "no daemon, no database, no HTTP service" line below is historical).
+> Tool execution remains deliberately out of scope. Current gate is **339 passing, 3 skipped**
+> (342 collected), not 52 — see [docs/STATUS.md](docs/STATUS.md).
+
+*(Historical)* `src/toolconnect/` began as a **Phase 1 validation prototype**. At that time it was
+in-memory only: no daemon, no database, no HTTP service, no tool execution.
 
 ```bash
 uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -e ".[dev]"
-.venv/bin/python -m pytest                        # 52 tests, offline
+.venv/bin/python -m pytest                        # 342 tests, offline
 .venv/bin/python experiments/flow_experiment.py   # is flow analysis useful?
 .venv/bin/python experiments/drift_experiment.py  # real drift, real repository
 ```

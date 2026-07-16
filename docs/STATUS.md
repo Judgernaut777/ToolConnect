@@ -13,7 +13,7 @@ The in-memory core remains the semantic authority; persistence hydrates and stor
 |---|---|
 | Phase | **1 complete + 0.1.0 runtime** ([PHASE1_VALIDATION.md](PHASE1_VALIDATION.md), [SERVICE.md](SERVICE.md), [CHANGELOG.md](../CHANGELOG.md)) |
 | Code | decision core + store/service/server/CLI/MCP adapter under `src/toolconnect/` |
-| Gate | `.venv/bin/python -m pytest` — **229 passing, 2 skipped**; under `unshare -rn` the 8 HTTP-socket tests also skip (loopback down), everything else passes offline |
+| Gate | `.venv/bin/python -m pytest` — **339 passing, 3 skipped** (342 collected); under `unshare -rn` an additional ~34 HTTP-loopback tests also skip (loopback down), everything else passes offline |
 | Language | Python 3.11 |
 | Deployment target | single box, local-first, offline decision path |
 | Blocking | the go/no-go questions below; the decisive one is whether a grant-time review artifact justifies a separate platform |
@@ -31,8 +31,9 @@ These are settled by the mission brief and the research, and should not be relit
 information.
 
 * **Scope.** ToolConnect owns the tool registry, discovery, capability metadata, permissions,
-  policy, health, invocation brokerage, and audit. It does not own task management, memory,
-  workflows, model routing, or secrets storage.
+  policy, health, invocation brokerage (authorization/decision brokering — grant issuance, not
+  in-path invocation proxying; see the boundary note in README.md), and audit. It does not own
+  task management, memory, workflows, model routing, or secrets storage.
 * **ToolConnect is a decision point, not a data path.** It never executes a tool. There is no
   `invoke()` in any interface. The policy enforcement point lives in the caller.
 * **Capability metadata is a registry assertion, never a server claim.** This follows directly
@@ -66,8 +67,9 @@ information.
   agreed: [AGENTCONNECT_CONTRACT.md](AGENTCONNECT_CONTRACT.md).
 * Who writes the assertions. Phase 1 measured the labeling bottleneck at **100% of tools**.
 * Distribution beyond a locally-built wheel (0.1.0 packages and installs cleanly; no index
-  publication is planned or decided). Licensing: `pyproject.toml` declares MIT but the repository
-  has **no LICENSE file** — an ecosystem-level decision deferred to the Connect release process.
+  publication is planned or decided). Licensing is settled: `pyproject.toml` declares
+  **Apache-2.0**, a `LICENSE` file is present at the repository root, and the license text ships
+  in the built wheel (`license-files = ["LICENSE"]`). No index publication is planned or decided.
 
 ## Open questions
 
