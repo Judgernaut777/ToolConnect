@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }} / py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install package with test extras
+        run: pip install -e ".[dev]"
+      - name: Entry-point smoke
+        # Catches packaging / console-script breakage the suite alone would miss.
+        run: toolconnect --help
+      - name: Run test suite
+        # Offline decision path; the HTTP tests use loopback, which the runner has.
+        # (Under `unshare -rn` the HTTP-loopback tests self-skip; here they run.)
+        run: python -m pytest -q
