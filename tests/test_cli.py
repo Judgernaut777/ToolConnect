@@ -28,6 +28,10 @@ class TestCli:
         assert out.returncode == 0, out.stderr
         assert db.exists()
         assert "audit chain ok=True" in out.stdout
+        # The reported schema version must be the store's actual version, not a
+        # hardcoded literal that rots on a schema bump (a fresh DB is at SCHEMA_VERSION).
+        from toolconnect.store import SCHEMA_VERSION
+        assert f"schema v{SCHEMA_VERSION}" in out.stdout
         # Idempotent: opening again succeeds and reports the same clean chain.
         out2 = _run("init-db", "--db", str(db))
         assert out2.returncode == 0
