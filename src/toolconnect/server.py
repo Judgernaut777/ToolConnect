@@ -55,6 +55,22 @@ class _RateLimiter:
         self.window = window_seconds
         self._hits: dict[str, deque[float]] = {}
         self._lock = threading.Lock()
+        self._last_sweep = 0.0
+
+    def _sweep(self, cutoff: float, now: float) -> None:
+        """Drop keys whose window has fully aged out. A client that sends a burst and
+        never returns would otherwise leave its (eventually empty) deque in ``_hits``
+        forever, since a key is only trimmed when that same key is re-checked. Bounded
+        to one pass per window so the amortized cost stays O(active clients)."""
+        if now - self._last_sweep < self.window:
+            return
+        self._last_sweep = now
+        for k in list(self._hits):
+            dq = self._hits[k]
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            if not dq:
+                del self._hits[k]
 
     @property
     def enabled(self) -> bool:
@@ -67,6 +83,7 @@ class _RateLimiter:
         now = time.monotonic() if now is None else now
         cutoff = now - self.window
         with self._lock:
+            self._sweep(cutoff, now)
             dq = self._hits.setdefault(key, deque())
             while dq and dq[0] < cutoff:
                 dq.popleft()
@@ -185,6 +202,13 @@ class _Handler(BaseHTTPRequestHandler):
             with self.lock:
                 result = self._route(method, unquote(url.path), query)
         except ServiceError as exc:
+            # A 413 is raised in _body() before the oversized body is read off the
+            # socket, and _drain_body caps at _MAX_BODY+1 so draining cannot resync
+            # the connection. Close it instead, or the undrained body would be parsed
+            # as the next request from a keep-alive (pooling) client. (The 400 JSON
+            # errors occur after the full body is read and are unaffected.)
+            if exc.status == 413:
+                self.close_connection = True
             self._error(exc.status, str(exc))
         except Exception as exc:  # a crash must never look like an allow
             self._error(500, f"internal error: {exc}")
