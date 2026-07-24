@@ -184,7 +184,8 @@ Stated so the review can be short:
   running under `unshare -rn` with no network.
 * No execution. ToolConnect never invokes a tool. AgentConnect's worker runtime remains
   the only thing that calls anything.
-* No adoption before Phase 2. This document is a proposal.
+* This began as a proposal deferring adoption to Phase 2; the seam is now adopted —
+  see the status header.
 
 ---
 
