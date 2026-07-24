@@ -77,6 +77,19 @@ class _RateLimiter:
             return True, 0.0
 
 
+class _Server(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a listen backlog sized for concurrent clients.
+
+    The stdlib default (``request_queue_size = 5``) overflows when more than a
+    handful of clients connect in the same instant the accept loop is busy — on a
+    loaded host the kernel resets the overflow and callers of a fail-closed
+    decision point see ``ConnectionResetError`` instead of a decision. 128 is the
+    historical SOMAXCONN floor; the kernel clamps it to ``somaxconn`` if lower.
+    """
+
+    request_queue_size = 128
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "toolconnect"
     protocol_version = "HTTP/1.1"
@@ -282,7 +295,7 @@ def make_server(service: ToolConnectService, host: str = DEFAULT_HOST,
         "service": service, "lock": threading.Lock(),
         "token": token or None,
         "limiter": _RateLimiter(rate_limit_per_min)})
-    return ThreadingHTTPServer((host, port), handler)
+    return _Server((host, port), handler)
 
 
 def serve(service: ToolConnectService, host: str = DEFAULT_HOST,
