@@ -1,8 +1,12 @@
 # Proposed integration contract — AgentConnect ↔ ToolConnect
 
-**Status: proposal. Nothing here is implemented, and AgentConnect was not modified.**
-This document exists to be reviewed and rejected or amended by AgentConnect's maintainer.
-It asks for a decision, not for agreement.
+**Status: adopted. The seam this document proposes is implemented in AgentConnect.**
+AgentConnect consumes ToolConnect through its fail-closed governor client
+(`ToolConnectGovernor`, wrapping the `toolconnect.client` library of §6b), bound from the
+environment and consulted at subtask dispatch. One mapping note from the adoption:
+AgentConnect translates `WorkerLocation.cloud` to `privacy_tier` `"trusted-cloud"`;
+`local` and `rented` pass through verbatim. The document is kept as the contract's
+rationale and shape; the decision it asked for has been made.
 
 **The ask, in one sentence.** AgentConnect gains an optional `ToolGovernor` seam whose
 *unavailability is a denial*, which is a different adapter posture from every other
@@ -195,8 +199,9 @@ priority:
 record_attempt, get_manager_inbox, get_handoff_summary` — and says managers read results
 "through MCP".
 
-`packages/agentconnect-mcp/src/agentconnect/mcp/server.py` registers 17 tools. Three of
-those primitives are not among them:
+`packages/agentconnect-mcp/src/agentconnect/mcp/server.py` registers 18 tools
+(`authorize_tool` was added with the governor wiring). Three of those primitives are not
+among them:
 
 * `claim_review`
 * `complete_review`
