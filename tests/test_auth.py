@@ -155,6 +155,52 @@ class TestBearerAuth:
             httpd.shutdown(); httpd.server_close(); store.close()
 
 
+class TestKeepAliveFraming:
+    def test_oversized_body_413_closes_the_connection(self, tmp_path):
+        """A >1 MiB body is refused in _body() before the socket is read, so the server
+        cannot drain it (_drain_body caps at _MAX_BODY+1). It must close the keep-alive
+        connection, or the undrained body would be parsed as the next request from a
+        connection-pooling client. Mirrors test_auth_check_precedes_body_parse's intent
+        for the oversized-body refusal path."""
+        httpd, store, base = _serve(tmp_path)
+        sock = None
+        try:
+            host, port = httpd.server_address[:2]
+            sock = socket.create_connection((host, port), timeout=10)
+            oversize = (1 << 20) + 1  # one byte past _MAX_BODY
+            req = (
+                f"POST /authorize HTTP/1.1\r\n"
+                f"Host: {host}:{port}\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {oversize}\r\n"
+                f"\r\n"
+            ).encode()
+            sock.sendall(req)
+            # Read until the server closes (EOF) or we give up. With the fix the server
+            # closes after the 413; without it the connection stays open and blocks on
+            # the next request line, so the client's read times out instead of seeing
+            # EOF. Reading to EOF (rather than a single recv) is robust to the 413
+            # response arriving across multiple TCP segments under load.
+            sock.settimeout(4.0)
+            data = b""
+            closed = False
+            try:
+                while True:
+                    chunk = sock.recv(4096)
+                    if chunk == b"":
+                        closed = True
+                        break
+                    data += chunk
+            except socket.timeout:
+                closed = False
+            assert b" 413 " in data
+            assert closed, "413 left the keep-alive connection open (undrained body)"
+        finally:
+            if sock is not None:
+                sock.close()
+            httpd.shutdown(); httpd.server_close(); store.close()
+
+
 class TestRateLimiting:
     def test_exceeding_the_window_returns_429(self, tmp_path):
         httpd, store, base = _serve(tmp_path, rate_limit_per_min=5)

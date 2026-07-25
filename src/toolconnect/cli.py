@@ -48,7 +48,7 @@ def _cmd_init_db(args) -> int:
     store = SqliteStore(db)
     chain = store.verify_chain()
     store.close()
-    print(f"initialized {db} (schema v1, audit chain ok={chain.ok}, "
+    print(f"initialized {db} (schema v{store.schema_version}, audit chain ok={chain.ok}, "
           f"records={chain.records})")
     return 0
 
