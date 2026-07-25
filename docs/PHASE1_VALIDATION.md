@@ -211,8 +211,8 @@ product than "the platform detects exfiltration," and the documents should say s
 The motivating case, run against `/home/mini/mcp-agentconnect` **without modifying it**.
 
 `BACKPLANE_SPEC.md` §17 names the manager-coordination primitives and says managers read
-results "through MCP". The MCP adapter registers 17 tools. Three of the named primitives
-are absent from it:
+results "through MCP". The MCP adapter registers 18 tools (`authorize_tool` was added
+with the governor wiring). Three of the named primitives are absent from it:
 
 ```
 ADVERTISED, MISSING AT RUNTIME:
