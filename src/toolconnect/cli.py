@@ -113,6 +113,67 @@ def _cmd_serve(args) -> int:
     return 0
 
 
+def _cmd_gateway(args) -> int:
+    """Run the MCP enforcement gateway: a stdio proxy in front of ONE downstream MCP
+    server command, authorizing and redeeming a grant for every ``tools/call`` before
+    forwarding it. See docs/adr/0003-mcp-enforcement-gateway.md."""
+    from .gateway import DownstreamTransportError, Gateway
+    from .policy import CedarPolicyEngine
+    from .service import ToolConnectService
+    from .store import SqliteStore
+
+    cfg = _load_config(args.config)
+    db = args.db or cfg.get("db")
+    policies_path = args.policies or cfg.get("policies")
+    if not db:
+        raise SystemExit("gateway requires --db PATH (or `db` in --config)")
+    if not policies_path:
+        raise SystemExit(
+            "gateway requires --policies FILE (or `policies` in --config); "
+            "a decision point must be told its policy set explicitly")
+    if not args.principal_id:
+        raise SystemExit("gateway requires --principal-id ID")
+    if not args.source_id:
+        raise SystemExit("gateway requires --source-id ID")
+    # argparse's REMAINDER keeps a leading bare `--` (the conventional separator
+    # between the gateway's own flags and the downstream command); strip it if present
+    # so `downstream` is exactly the argv to exec, never off-by-one.
+    downstream = list(args.downstream)
+    if downstream and downstream[0] == "--":
+        downstream = downstream[1:]
+    if not downstream:
+        raise SystemExit(
+            "gateway requires a downstream command: "
+            "toolconnect gateway ... -- <downstream command...>")
+
+    db = str(Path(db).expanduser())
+    policies = Path(policies_path).expanduser()
+    if not policies.exists():
+        raise SystemExit(f"policy file not found: {policies_path}")
+    try:
+        engine = CedarPolicyEngine(policies.read_text())
+    except ValueError as exc:
+        raise SystemExit(f"{exc} (policy file: {policies_path})")
+
+    store = SqliteStore(db)
+    try:
+        service = ToolConnectService(store, engine)
+        principal = {"id": args.principal_id, "kind": args.principal_kind,
+                    "privacy_tier": args.privacy_tier}
+        try:
+            # Gateway construction spawns the downstream subprocess; a dead-at-startup
+            # downstream must be one actionable line, not a traceback — and must not
+            # skip the store cleanup below.
+            gw = Gateway(service, principal=principal, source_id=args.source_id,
+                        command=downstream, client_in=sys.stdin, client_out=sys.stdout,
+                        timeout=args.timeout)
+        except DownstreamTransportError as exc:
+            raise SystemExit(f"gateway: could not start downstream command: {exc}")
+        return gw.run()
+    finally:
+        store.close()
+
+
 def _cmd_verify_audit(args) -> int:
     """Walk the audit hash chain and report. Exit non-zero if it is broken — this is
     the shape an operator's cron job or health check wants."""
@@ -250,6 +311,27 @@ def main(argv: list[str] | None = None) -> int:
                          help="requests per minute per client IP (0 = off)")
     p_serve.add_argument("--config", help="TOML config file")
     p_serve.set_defaults(func=_cmd_serve)
+
+    p_gateway = sub.add_parser(
+        "gateway",
+        help="run the MCP enforcement gateway in front of one downstream MCP server")
+    p_gateway.add_argument("--db", help="path to the SQLite database")
+    p_gateway.add_argument("--policies", help="path to a Cedar policy file")
+    p_gateway.add_argument("--principal-id", dest="principal_id",
+                           help="id of the principal every forwarded call authorizes as")
+    p_gateway.add_argument("--principal-kind", dest="principal_kind", default="agent",
+                           help="principal kind (default agent)")
+    p_gateway.add_argument("--privacy-tier", dest="privacy_tier", default="local",
+                           help="principal privacy tier (default local)")
+    p_gateway.add_argument("--source-id", dest="source_id",
+                           help="the catalog source_id this downstream command "
+                                "was registered and ingested under")
+    p_gateway.add_argument("--timeout", type=float, default=30.0,
+                           help="per-call downstream timeout in seconds (default 30)")
+    p_gateway.add_argument("--config", help="TOML config file")
+    p_gateway.add_argument("downstream", nargs=argparse.REMAINDER,
+                           help="the downstream MCP server command, after `--`")
+    p_gateway.set_defaults(func=_cmd_gateway)
 
     p_verify = sub.add_parser("verify-audit",
                               help="walk the audit hash chain; exit 1 if broken")

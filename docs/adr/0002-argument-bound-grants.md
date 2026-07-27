@@ -102,6 +102,31 @@ arguments are ever persisted or audited, only their hash.
   `GET /grants?state=redeemed`.
 * **One-way schema door.** Schema `v4` (the `grants` table) means an older ToolConnect
   binary refuses to open a `v4` database (`SchemaTooNewError`) — noted in `CHANGELOG.md`.
+* **Grant mutation / audit-append crash window — deferred at initial 1.1 ship, now
+  closed.** The first cut of this feature wrote a grant's row (`issue_grant`,
+  `redeem_grant`, `close_grant`) and its paired audit record (`grant_issue`,
+  `grant_redeem`, `grant_close`) as two *separate* SQLite transactions, orchestrated by
+  `ToolConnectService`. A crash between the two left a grant mutated with no audit
+  trace — the one failure mode this whole feature exists to make impossible. Closed by
+  moving the audit append *into* the store method that owns each mutation, via an
+  internal `SqliteStore._append_audit_in_txn` helper: the grant write and its audit
+  record are now one SQLite transaction (the `with self._conn:` idiom for
+  `issue_grant`/`close_grant`, the existing manual `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK`
+  for `redeem_grant`), so a failed audit append rolls the grant mutation back with it —
+  fail-closed, not merely fail-loud. `close_grant`'s idempotent no-op branch (an
+  already-closed grant) pairs its audit the same way, so every close *attempt* on a
+  known grant leaves a matching trace, not just every close that changes state. The
+  public `append_audit` contract is unchanged for every other caller (`decision`,
+  `ingest`, `assertion`, `drift`, `source`, `outcome`); only the three grant-owning
+  methods gained this internal pairing. `redeem_grant` keeps `BEGIN IMMEDIATE` and reads
+  the expiry clock under the lock exactly as before — untouched by this fix. Denial
+  paths that mutate nothing (`not_found`, `already_redeemed`, `closed`, `expired`,
+  `principal_mismatch`, `args_mismatch`) have no row write to pair with, so
+  `grant_redeem_denied` is still appended by the caller in its own transaction, as
+  before — there is nothing for a crash to tear there. Verified by fault-injected audit
+  failures at each of the three seams (`tests/test_grant_audit_atomicity.py`), each
+  proving the grant row is left exactly as it was before the call, plus a chain-integrity
+  check across interleaved grant and non-grant audit traffic.
 
 ## 5. What did not change
 

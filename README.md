@@ -5,10 +5,15 @@ authority on *which* tools exist, *what they do*, *who may call them*, *whether 
 healthy*, and *what happened when they were called*.
 
 As of **0.1.0** there is a runtime: SQLite persistence, `toolconnect serve` (a loopback HTTP
-decision service on 127.0.0.1:8095), a real MCP stdio discovery adapter, and an installable
-wheel with a CLI — see [docs/SERVICE.md](docs/SERVICE.md). What there is deliberately **not**,
-and never will be, is tool execution: no `invoke()`, no proxy, no data path. See
-[docs/STATUS.md](docs/STATUS.md) before proposing work.
+decision service on 127.0.0.1:8095), a real MCP stdio discovery adapter, an installable
+wheel with a CLI, and `toolconnect gateway` — an optional MCP stdio enforcement proxy in
+front of one downstream tool server, so authorize→redeem is a path a caller cannot skip
+rather than a contract it can choose to honor. See [docs/SERVICE.md](docs/SERVICE.md) and
+[docs/adr/0003-mcp-enforcement-gateway.md](docs/adr/0003-mcp-enforcement-gateway.md). What
+there is deliberately **not**, and never will be, is tool *implementation*: no tool logic of
+ToolConnect's own authorship, ever — the gateway forwards calls to servers someone else
+wrote; it does not execute them itself. See [docs/STATUS.md](docs/STATUS.md) before
+proposing work.
 
 ```
 toolconnect init-db --db ./toolconnect.db
@@ -62,9 +67,10 @@ constraint shapes most of the architecture.
 | **Invocation brokerage**¹ | Admission control and grant issuance. See the boundary note below. |
 | **Audit** | A tamper-evident record of every decision, including the denials. |
 
-¹ "Brokerage" here means authorization/decision brokering — issuing a grant or denial — not
-in-path invocation proxying. ToolConnect never sits on the invocation data path; see
-"The brokerage boundary" below.
+¹ "Brokerage" here means authorization/decision brokering — issuing a grant or denial. The
+decision service is never on the invocation data path; the optional `toolconnect gateway`
+enforcement proxy is the one component that is, and it is a separable PEP, not the decision
+service. See "The brokerage boundary" below.
 
 ## What ToolConnect does not own
 
@@ -93,16 +99,23 @@ And three hard constraints on scope:
 ### The brokerage boundary
 
 "Owns invocation brokerage" and "is not a tool execution engine" only coexist under one reading,
-and the architecture commits to it: **ToolConnect is a decision point, not a data path.**
+and the architecture commits to it: **the decision service is a decision point, not a data
+path.**
 
-It authorizes an invocation and records its outcome. It does not carry the request, does not
-implement a transport, and does not sit between an agent and a tool server by default. A caller
-asks for permission, receives a grant or a denial, performs the call itself using an ordinary
-MCP or HTTP client, and reports back what happened.
+It authorizes an invocation and records its outcome. In the default deployment it does not carry
+the request and does not sit between an agent and a tool server: a caller asks for permission,
+receives a grant or a denial, performs the call itself using an ordinary MCP or HTTP client, and
+reports back what happened.
 
-In the vocabulary of XACML, ToolConnect is the **Policy Decision Point**, the **Policy
-Administration Point**, and the **audit sink**. The **Policy Enforcement Point** lives in the
-caller. This is what keeps "brokerage" from collapsing into "proxy."
+In the vocabulary of XACML, the ToolConnect decision service is the **Policy Decision Point**,
+the **Policy Administration Point**, and the **audit sink**. The **Policy Enforcement Point**
+has two supported homes: the caller (the client SDK's `governed_invoke`), or — when the caller
+cannot be trusted to honor the contract — `toolconnect gateway`, a separable first-party PEP
+that carries each authorized, redeemed `tools/call` to the one downstream MCP server it fronts
+([ADR 0003](docs/adr/0003-mcp-enforcement-gateway.md)). In both deployments the decision service
+itself never touches tool traffic, and neither the SDK nor the gateway ever implements a tool.
+That separation — decisions in a PDP that is never on the wire, enforcement in a thin, optional,
+replaceable PEP — is what keeps "brokerage" from collapsing into "proxy."
 
 ## Where it sits
 
@@ -113,7 +126,8 @@ umbrella, alongside **AgentConnect** (the work ledger — release candidate), **
 product's exact commit and last-verified gate in its ecosystem manifest
 (`manifest/ecosystem.yaml`), and its `COMPATIBILITY.md` is the canonical cross-ecosystem
 reference — this repository links to it rather than duplicating it. AgentConnect consumes
-ToolConnect through a first-class `ToolConnectGovernor` (adopted contract v1.0).
+ToolConnect through a first-class `ToolConnectGovernor` (adopted contract v1.1 —
+argument-bound one-use grants at the final invocation boundary).
 
 ToolConnect follows the discipline the AgentConnect specs established:
 
@@ -139,8 +153,8 @@ runtime, or the transports. Each of them is replaceable behind an adapter.
 > **SUPERSEDED (2026-07-17):** this section describes the original Phase 1 validation prototype.
 > As of 0.1.0 `src/toolconnect/` **is** the product runtime: it has a daemon, SQLite persistence,
 > and an HTTP service (the "no daemon, no database, no HTTP service" line below is historical).
-> Tool execution remains deliberately out of scope. Current gate is **339 passing, 3 skipped**
-> (342 collected), not 52 — see [docs/STATUS.md](docs/STATUS.md).
+> Tool execution remains deliberately out of scope. Current gate is **462 passing, 3 skipped**
+> (465 collected), not 52 — see [docs/STATUS.md](docs/STATUS.md).
 
 *(Historical)* `src/toolconnect/` began as a **Phase 1 validation prototype**. At that time it was
 in-memory only: no daemon, no database, no HTTP service, no tool execution.
@@ -162,8 +176,13 @@ tool-level RBAC and audit at the network edge, use
 
 ToolConnect is not a better version of those. It is a different shape: a protocol-neutral,
 local-first governance *library and ledger* that its siblings call in-process, with no sidecar
-and no network hop in the decision path — and which can delegate the in-path proxy role to
-exactly those projects as a deployment adapter. The reasoning is in
+and no network hop in the decision path. Since 0.1.0 it does ship one first-party in-path
+component — `toolconnect gateway`, a deliberately small PEP fronting exactly one downstream
+stdio server for callers that cannot be trusted to honor authorize→redeem — but that is an
+enforcement adapter over the same in-process decision core, not a proxy platform: no registry
+UI, no plugin chain, no multi-server routing. For those, ContextForge and agentgateway remain
+the right choice, and ToolConnect can still delegate the in-path role to exactly those projects
+as a deployment adapter. The reasoning is in
 [ARCHITECTURE.md](docs/ARCHITECTURE.md#why-not-just-use-contextforge-or-agentgateway), including
 the conditions under which building this is the wrong call.
 

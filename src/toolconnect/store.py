@@ -471,32 +471,47 @@ class SqliteStore:
 
     # -- audit ----------------------------------------------------------------------
 
-    def append_audit(self, kind: str, body: Mapping[str, Any]) -> int:
-        """Append one hash-chained audit record; returns its sequence number."""
+    def _append_audit_in_txn(self, kind: str, body: Mapping[str, Any]) -> int:
+        """Append one hash-chained audit record without opening or closing a
+        transaction of its own.
+
+        The caller MUST already hold ``self._lock`` and be inside an open write
+        transaction — either the ``with self._conn:`` idiom, or a manually-managed
+        ``BEGIN``/``COMMIT``/``ROLLBACK`` block (as ``redeem_grant`` uses) — before
+        calling this. That is precisely what lets a grant mutation and its paired
+        audit record commit, or roll back, together as one unit (ADR 0002 §4): if the
+        audit append below raises, the caller's enclosing transaction is what rolls
+        the grant mutation back with it. See ``issue_grant``/``redeem_grant``/
+        ``close_grant``, which are the only other callers.
+        """
         payload = _canonical(dict(body))
         created = _now()
+        row = self._conn.execute(
+            "SELECT record_hash FROM audit ORDER BY seq DESC LIMIT 1").fetchone()
+        prev = row[0] if row is not None else _GENESIS
+        record_hash = hashlib.sha256(
+            f"{kind}\x1f{payload}\x1f{created}\x1f{prev}".encode("utf-8")).hexdigest()
+        cur = self._conn.execute(
+            "INSERT INTO audit(kind, body, created_at, prev_hash, record_hash) "
+            "VALUES (?,?,?,?,?)", (kind, payload, created, prev, record_hash))
+        seq = int(cur.lastrowid)
+        # Advance the durable high-water mark in the SAME transaction as the INSERT.
+        # If the process dies between the two, both roll back together; the mark can
+        # therefore never point past the chain, only ever match its true tip.
+        self._conn.execute(
+            "INSERT INTO meta(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (_AUDIT_HEAD_SEQ, str(seq)))
+        self._conn.execute(
+            "INSERT INTO meta(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (_AUDIT_HEAD_HASH, record_hash))
+        return seq
+
+    def append_audit(self, kind: str, body: Mapping[str, Any]) -> int:
+        """Append one hash-chained audit record; returns its sequence number."""
         with self._lock, self._conn:
-            row = self._conn.execute(
-                "SELECT record_hash FROM audit ORDER BY seq DESC LIMIT 1").fetchone()
-            prev = row[0] if row is not None else _GENESIS
-            record_hash = hashlib.sha256(
-                f"{kind}\x1f{payload}\x1f{created}\x1f{prev}".encode("utf-8")).hexdigest()
-            cur = self._conn.execute(
-                "INSERT INTO audit(kind, body, created_at, prev_hash, record_hash) "
-                "VALUES (?,?,?,?,?)", (kind, payload, created, prev, record_hash))
-            seq = int(cur.lastrowid)
-            # Advance the durable high-water mark in the SAME transaction as the INSERT.
-            # If the process dies between the two, both roll back together; the mark can
-            # therefore never point past the chain, only ever match its true tip.
-            self._conn.execute(
-                "INSERT INTO meta(key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (_AUDIT_HEAD_SEQ, str(seq)))
-            self._conn.execute(
-                "INSERT INTO meta(key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (_AUDIT_HEAD_HASH, record_hash))
-            return seq
+            return self._append_audit_in_txn(kind, body)
 
     def read_audit(self, kind: str | None = None, limit: int = 100) -> list[dict]:
         q = "SELECT seq, kind, body, created_at, record_hash FROM audit"
@@ -592,13 +607,25 @@ class SqliteStore:
 
     def issue_grant(self, *, grant_id: str, decision_id: str, principal_id: str,
                     source_id: str, name: str, args_hash: str,
-                    issued_at: str, expires_at: str) -> None:
+                    issued_at: str, expires_at: str,
+                    ttl_seconds: int | None = None) -> int:
+        """Insert the grant row and append its ``grant_issue`` audit record as ONE
+        SQLite transaction (ADR 0002 §4): if the audit append fails, the insert rolls
+        back with it, so a grant can never exist with no matching audit trace.
+        Returns the audit record's sequence number.
+        """
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO grants(grant_id, decision_id, principal_id, source_id, "
                 "name, args_hash, issued_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
                 (grant_id, decision_id, principal_id, source_id, name,
                  args_hash, issued_at, expires_at))
+            return self._append_audit_in_txn("grant_issue", {
+                "grant_id": grant_id, "decision_id": decision_id,
+                "principal_id": principal_id, "source_id": source_id, "name": name,
+                "args_hash": args_hash, "issued_at": issued_at,
+                "expires_at": expires_at, "ttl_seconds": ttl_seconds,
+            })
 
     def get_grant(self, grant_id: str) -> dict | None:
         with self._lock:
@@ -674,9 +701,18 @@ class SqliteStore:
                     return _deny("args_mismatch", did, sid, nm)
                 if invocable_check is not None and not invocable_check(sid, nm):
                     # Kill the grant permanently in the SAME transaction, then deny.
+                    # The close mutation and its `grant_close` audit record are
+                    # appended in this same still-open transaction (ADR 0002 §4): if
+                    # the audit append raises, the outer `except` below rolls back
+                    # the UPDATE with it — the grant is never left closed with no
+                    # audit trace.
                     self._conn.execute(
                         "UPDATE grants SET closed_at=? WHERE grant_id=? "
                         "AND closed_at IS NULL", (_now(), grant_id))
+                    self._append_audit_in_txn("grant_close", {
+                        "grant_id": grant_id, "decision_id": did,
+                        "reason": "not_invocable", "already_closed": False,
+                    })
                     self._conn.execute("COMMIT")
                     return {"redeemed": False, "reason": "not_invocable",
                             "decision_id": did, "source_id": sid, "name": nm}
@@ -686,6 +722,12 @@ class SqliteStore:
                     (_now(), grant_id))
                 if cur.rowcount != 1:
                     return _deny("already_redeemed", did, sid, nm)
+                # Same reasoning as above: the redeem mutation and its `grant_redeem`
+                # audit record commit or roll back together.
+                self._append_audit_in_txn("grant_redeem", {
+                    "grant_id": grant_id, "decision_id": did,
+                    "principal_id": principal_id, "source_id": sid, "name": nm,
+                })
                 self._conn.execute("COMMIT")
                 return {"redeemed": True, "reason": "ok", "decision_id": did,
                         "source_id": sid, "name": nm}
@@ -693,20 +735,31 @@ class SqliteStore:
                 self._conn.execute("ROLLBACK")
                 raise
 
-    def close_grant(self, grant_id: str) -> dict | None:
-        """Idempotent. Returns ``{"decision_id", "already_closed"}``, or ``None`` if unknown."""
+    def close_grant(self, grant_id: str, *, reason: str = "explicit_close") -> dict | None:
+        """Idempotent. Closes the grant (if not already) and appends its
+        ``grant_close`` audit record as ONE SQLite transaction (ADR 0002 §4) — paired
+        even on the idempotent no-op branch, so every close attempt on a known grant
+        leaves a matching audit trace, and a failed audit append rolls the close
+        mutation back with it. Returns ``{"decision_id", "already_closed"}``, or
+        ``None`` if the grant is unknown (nothing to close, nothing to audit).
+        """
         with self._lock, self._conn:
             row = self._conn.execute(
                 "SELECT decision_id, closed_at FROM grants WHERE grant_id=?",
                 (grant_id,)).fetchone()
             if row is None:
                 return None
-            if row[1] is not None:
-                return {"decision_id": row[0], "already_closed": True}
-            self._conn.execute(
-                "UPDATE grants SET closed_at=? WHERE grant_id=? AND closed_at IS NULL",
-                (_now(), grant_id))
-            return {"decision_id": row[0], "already_closed": False}
+            decision_id, closed_at = row
+            already_closed = closed_at is not None
+            if not already_closed:
+                self._conn.execute(
+                    "UPDATE grants SET closed_at=? WHERE grant_id=? AND closed_at IS NULL",
+                    (_now(), grant_id))
+            self._append_audit_in_txn("grant_close", {
+                "grant_id": grant_id, "decision_id": decision_id,
+                "reason": str(reason), "already_closed": already_closed,
+            })
+            return {"decision_id": decision_id, "already_closed": already_closed}
 
     def list_grants(self, state: str | None = None, limit: int = 100) -> list[dict]:
         with self._lock:

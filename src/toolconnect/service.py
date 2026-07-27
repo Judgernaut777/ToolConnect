@@ -427,16 +427,13 @@ class ToolConnectService:
                 issued = datetime.now(timezone.utc)
                 expires = issued + timedelta(seconds=ttl)
                 grant_id = uuid.uuid4().hex
+                # issue_grant appends the paired `grant_issue` audit record itself,
+                # in the same SQLite transaction as the grant insert (ADR 0002 §4).
                 self.store.issue_grant(
                     grant_id=grant_id, decision_id=decision_id, principal_id=p.id,
                     source_id=source_id, name=name, args_hash=bound_hash,
-                    issued_at=issued.isoformat(), expires_at=expires.isoformat())
-                self.store.append_audit("grant_issue", {
-                    "grant_id": grant_id, "decision_id": decision_id,
-                    "principal_id": p.id, "source_id": source_id, "name": name,
-                    "args_hash": bound_hash, "issued_at": issued.isoformat(),
-                    "expires_at": expires.isoformat(), "ttl_seconds": ttl,
-                })
+                    issued_at=issued.isoformat(), expires_at=expires.isoformat(),
+                    ttl_seconds=ttl)
                 grant_payload = {
                     "grant_id": grant_id, "args_hash": bound_hash,
                     "expires_at": expires.isoformat(), "ttl_seconds": ttl,
@@ -461,21 +458,15 @@ class ToolConnectService:
             presented_hash = hashing.args_hash(args)
         except hashing.ArgsNotHashable as exc:
             raise ServiceError(400, f"args cannot be canonicalized: {exc}")
+        # redeem_grant appends the paired `grant_redeem`/`grant_close` audit record
+        # itself, in the same transaction as the mutation it belongs to (ADR 0002
+        # §4). `grant_redeem_denied` has no mutation of its own to pair with — every
+        # deny reason reaches here, including `not_invocable`, whose grant_close was
+        # already committed inside redeem_grant above.
         result = self.store.redeem_grant(
             grant_id, args_hash=presented_hash, principal_id=p.id,
             invocable_check=lambda sid, nm: self.catalog.invocable(sid, nm))
-        if result["redeemed"]:
-            self.store.append_audit("grant_redeem", {
-                "grant_id": grant_id, "decision_id": result["decision_id"],
-                "principal_id": p.id, "source_id": result["source_id"],
-                "name": result["name"],
-            })
-        else:
-            if result["reason"] == "not_invocable":
-                self.store.append_audit("grant_close", {
-                    "grant_id": grant_id, "decision_id": result["decision_id"],
-                    "reason": "not_invocable", "already_closed": False,
-                })
+        if not result["redeemed"]:
             self.store.append_audit("grant_redeem_denied", {
                 "grant_id": grant_id, "decision_id": result["decision_id"],
                 "principal_id": p.id, "reason": result["reason"],
@@ -488,13 +479,11 @@ class ToolConnectService:
         }
 
     def close_grant(self, grant_id: str, reason: str = "explicit_close") -> dict:
-        closed = self.store.close_grant(grant_id)
+        # close_grant appends the paired `grant_close` audit record itself, in the
+        # same transaction as the close mutation (ADR 0002 §4).
+        closed = self.store.close_grant(grant_id, reason=reason)
         if closed is None:
             raise ServiceError(404, f"unknown grant {grant_id!r}")
-        self.store.append_audit("grant_close", {
-            "grant_id": grant_id, "decision_id": closed["decision_id"],
-            "reason": str(reason), "already_closed": closed["already_closed"],
-        })
         return {
             "grant_id": grant_id, "decision_id": closed["decision_id"],
             "closed": True, "already_closed": closed["already_closed"],
@@ -540,11 +529,8 @@ class ToolConnectService:
                 raise ServiceError(
                     400, f"grant {grant_id!r} does not belong to decision "
                          f"{decision_id!r}")
-            closed = self.store.close_grant(grant_id)
-            self.store.append_audit("grant_close", {
-                "grant_id": grant_id, "decision_id": decision_id,
-                "reason": "outcome_reported", "already_closed": closed["already_closed"],
-            })
+            # Paired atomically inside close_grant (ADR 0002 §4).
+            self.store.close_grant(grant_id, reason="outcome_reported")
             response["grant_closed"] = True
         return response
 

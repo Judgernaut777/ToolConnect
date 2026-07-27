@@ -4,16 +4,21 @@
 
 ToolConnect is at **0.1.0**: the Phase 1 in-memory decision core is now wrapped in a runtime —
 SQLite persistence, a loopback HTTP service (`toolconnect serve`, 127.0.0.1:8095), a real MCP
-stdio discovery adapter, and an installable wheel with a CLI. See [SERVICE.md](SERVICE.md).
-What has **not** changed: there is still no tool execution anywhere. `grep -rn "def invoke" src/`
-returns nothing, tests assert no invocation route exists, and the MCP adapter has no `tools/call`.
+stdio discovery adapter, an installable wheel with a CLI, argument-bound one-use grants
+(contract 1.1, [adr/0002](adr/0002-argument-bound-grants.md)), and `toolconnect gateway` — an
+optional MCP stdio enforcement proxy (a first-party PEP) in front of exactly one downstream
+server ([adr/0003](adr/0003-mcp-enforcement-gateway.md)). See [SERVICE.md](SERVICE.md).
+What has **not** changed: ToolConnect still implements no tool of its own. `grep -rn "def invoke"
+src/` returns nothing and the discovery adapter has no `tools/call`. The gateway *forwards* an
+authorized, redeemed `tools/call` to a server someone else wrote — it carries the call, it never
+executes one, and the decision service it embeds stays out of the data path in every deployment.
 The in-memory core remains the semantic authority; persistence hydrates and stores it.
 
 | | |
 |---|---|
 | Phase | **1 complete + 0.1.0 runtime** ([PHASE1_VALIDATION.md](PHASE1_VALIDATION.md), [SERVICE.md](SERVICE.md), [CHANGELOG.md](../CHANGELOG.md)) |
-| Code | decision core + store/service/server/CLI/MCP adapter under `src/toolconnect/` |
-| Gate | `.venv/bin/python -m pytest` — **339 passing, 3 skipped** (342 collected); under `unshare -rn` an additional ~34 HTTP-loopback tests also skip (loopback down), everything else passes offline |
+| Code | decision core + store/service/server/CLI/MCP adapter/enforcement gateway under `src/toolconnect/` |
+| Gate | `.venv/bin/python -m pytest` — **462 passing, 3 skipped** (465 collected); under `unshare -rn` HTTP-loopback tests also skip (loopback down), everything else passes offline |
 | Language | Python 3.11 |
 | Deployment target | single box, local-first, offline decision path |
 | Blocking | the go/no-go questions below; the decisive one is whether a grant-time review artifact justifies a separate platform |
@@ -31,11 +36,15 @@ These are settled by the mission brief and the research, and should not be relit
 information.
 
 * **Scope.** ToolConnect owns the tool registry, discovery, capability metadata, permissions,
-  policy, health, invocation brokerage (authorization/decision brokering — grant issuance, not
-  in-path invocation proxying; see the boundary note in README.md), and audit. It does not own
-  task management, memory, workflows, model routing, or secrets storage.
-* **ToolConnect is a decision point, not a data path.** It never executes a tool. There is no
-  `invoke()` in any interface. The policy enforcement point lives in the caller.
+  policy, health, invocation brokerage (authorization/decision brokering — grant issuance; see
+  the boundary note in README.md), and audit. It does not own task management, memory,
+  workflows, model routing, or secrets storage.
+* **The decision service is a decision point, not a data path.** It never executes a tool. There
+  is no `invoke()` in any interface. The policy enforcement point lives in the caller by
+  default; since 0.1.0 an optional, separable first-party PEP (`toolconnect gateway`,
+  [adr/0003](adr/0003-mcp-enforcement-gateway.md)) can enforce authorize→redeem in-path in front
+  of one downstream MCP server — in both deployments the PDP itself stays off the invocation
+  data path, and nothing in this repository implements a tool.
 * **Capability metadata is a registry assertion, never a server claim.** This follows directly
   from MCP's own normative rule that clients must treat tool annotations as untrusted.
 * **Tool authorization fails closed.** Unlike AgentConnect's memory adapter, ToolConnect may not
