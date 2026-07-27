@@ -228,6 +228,10 @@ class _Handler(BaseHTTPRequestHandler):
     _ASSERTION = re.compile(r"^/assertions/(?P<sid>.+)/(?P<name>[^/]+)$")
     _DRIFT = re.compile(r"^/drift/(?P<sid>.+)$")
     _OUTCOME = re.compile(r"^/decisions/(?P<decision_id>[^/]+)/outcome$")
+    # Redeem/close must be matched before the bare _GRANT route.
+    _GRANT_REDEEM = re.compile(r"^/grants/(?P<grant_id>[^/]+)/redeem$")
+    _GRANT_CLOSE = re.compile(r"^/grants/(?P<grant_id>[^/]+)/close$")
+    _GRANT = re.compile(r"^/grants/(?P<grant_id>[^/]+)$")
 
     def _route(self, method: str, path: str, query: dict):
         svc = self.service
@@ -254,6 +258,12 @@ class _Handler(BaseHTTPRequestHandler):
                 return svc.get_assertion(m["sid"], m["name"])
             if m := self._DRIFT.match(path):
                 return svc.drift(m["sid"])
+            if path == "/grants":
+                limit = int(query.get("limit", "100"))
+                state = query.get("state")
+                return {"grants": svc.list_grants(state=state, limit=max(1, min(limit, 1000)))}
+            if m := self._GRANT.match(path):
+                return svc.get_grant(m["grant_id"])
 
         if method == "POST":
             if path == "/sources":
@@ -267,9 +277,19 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             if path == "/authorize":
                 b = self._body()
+                # Presence semantics: only forward `args`/`ttl_seconds` as keywords
+                # when the caller's JSON body actually mentioned the key, so an
+                # explicit `"args": null` reaches the service AS an explicit None
+                # (malformed shape, 400) rather than being indistinguishable from a
+                # legacy caller who never mentioned `args` at all.
+                kwargs: dict = {}
+                if "args" in b:
+                    kwargs["args"] = b["args"]
+                if "ttl_seconds" in b:
+                    kwargs["ttl_seconds"] = b["ttl_seconds"]
                 return svc.authorize(
                     b.get("principal") or {}, str(b.get("source_id", "")),
-                    str(b.get("name", "")), b.get("context"))
+                    str(b.get("name", "")), b.get("context"), **kwargs)
             if m := self._INGEST.match(path):
                 b = self._body()
                 timeout = float(b.get("timeout", 10.0))
@@ -285,7 +305,15 @@ class _Handler(BaseHTTPRequestHandler):
             if m := self._OUTCOME.match(path):
                 b = self._body()
                 return svc.record_outcome(m["decision_id"], str(b.get("outcome", "")),
-                                          b.get("detail"))
+                                          b.get("detail"), grant_id=b.get("grant_id"))
+            if m := self._GRANT_REDEEM.match(path):
+                b = self._body()
+                return svc.redeem_grant(
+                    m["grant_id"], b.get("principal") or {}, b.get("args"))
+            if m := self._GRANT_CLOSE.match(path):
+                b = self._body()
+                return svc.close_grant(
+                    m["grant_id"], str(b.get("reason", "explicit_close")))
 
         raise ServiceError(404, f"no route {method} {path}")
 

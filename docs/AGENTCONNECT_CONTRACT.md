@@ -255,6 +255,65 @@ delegation-chain intersection is already computed client-side via
 AgentConnect need not import ToolConnect — it depends only on the Protocol it defines and
 this HTTP client. Proven against a live `toolconnect serve` in `demo_client_auth.py`.
 
+## 6c. Argument-bound grants (contract 1.1) — the final invocation boundary
+
+Contract 1.0's `authorize`/`record` pair governs at worker-dispatch time: it answers
+"may this principal call this tool" once, before the agent loop starts making its own
+choices about arguments. That leaves a gap — the declared toolset check happens once,
+early, and every actual tool call after it runs ungoverned by ToolConnect. Contract 1.1
+closes that gap by moving enforcement to the **final invocation boundary**: authorize the
+exact arguments the runtime is about to execute, redeem a one-use grant for them
+immediately before executing, and only then run the call.
+
+**Wire shape**, additive over 1.0 (a server on either version answers a no-`args`
+`/authorize` identically):
+
+* `authorize(principal, source_id, name, context=None, *, args=None, ttl_seconds=None)`
+  → on allow with `args` given, the returned `ClientDecision.grant` is a `ClientGrant
+  {grant_id, args_hash, expires_at, ttl_seconds}`; `None` on deny, and `None` when `args`
+  was not sent at all (the legacy 1.0 shape).
+* `redeem(grant_id, principal, args)` → `ClientRedemption {redeemed, reason, grant_id,
+  decision_id, source_id, name, contract_version}`. Resubmits the **raw** args — the
+  server is the only hasher on either side of this contract; AgentConnect never learns
+  or re-derives the canonicalization rule (`docs/SERVICE.md` → *Argument-bound one-use
+  grants*).
+* `record_outcome(decision_id, outcome, detail=None, grant_id=None)` — `grant_id`, when
+  given, closes that grant in the same call.
+
+**The mixed-fleet refusal rule, load-bearing:** if `authorize` is called with `args` and
+the response is an allow with **no** `grant` — because the server predates 1.1 and
+silently dropped the `args` key it doesn't understand — the caller must refuse, **not**
+execute ungoverned. `ToolConnectGovernor.authorize` enforces this itself (returns a deny
+with `unavailable=True`); AgentConnect's runtime loop never needs to re-derive it, but
+must never bypass it either (e.g. by falling back to a decision-only path when a grant is
+missing).
+
+**`ToolGovernor`, hardened.** The Protocol's `redeem` method is **required**, not an
+optional sub-protocol behind an `isinstance` check — an optional/degrading `redeem`
+would recreate exactly the gap this contract exists to close (an old governor executing
+final arguments ungoverned). A bound governor that lacks a usable grant/redeem path must
+cause the runtime to **refuse execution** (an `ERROR` observation fed back to the model),
+never silently fall back to the pre-1.1 declared-toolset-only behavior.
+
+**AgentConnect-side wiring.** The declared-toolset check at prepare time (§3, `core/
+service.py`'s `_consult_tool_governor`) stays as the cheap early gate — it has never seen
+final arguments and still doesn't. The enforcement point is the runtime tool-execution
+loop (`runtime/graph.py`'s `run_tool`): for every actual tool call, build the **exact**
+final arguments the executor is about to use, `authorize(args=final_args)`, `redeem` the
+returned grant with those same arguments, and only then execute — mirroring the client
+SDK's `governed_invoke` helper (`docs/SERVICE.md`). Local static gates (`allow_shell`,
+`allow_tests`, …) run first, cheaply, before any network round trip; a bound governor
+wraps only the actual execution. The one documented exception is `delegate`: it executes
+nothing external itself, and the child subtask is governed through the router's own
+gate when it runs — the omission is a decision, not an oversight (see
+`docs/adr/0009-final-invocation-boundary.md` on the AgentConnect side).
+
+**TOCTOU, honestly**: nothing in this contract stops a caller from mutating its own
+arguments between a successful redeem and the executor call it wraps. AgentConnect's
+runtime is expected to build `final_args` once and hand the identical mapping to
+`authorize`, `redeem`, and the executor — exactly what `governed_invoke` does for direct
+adopters of the client SDK.
+
 ## 7. What AgentConnect's maintainer is being asked to decide
 
 1. **Is a fail-closed seam acceptable** in a codebase whose every other adapter fails
