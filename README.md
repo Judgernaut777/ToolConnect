@@ -107,14 +107,13 @@ caller. This is what keeps "brokerage" from collapsing into "proxy."
 ## Where it sits
 
 ToolConnect is one of four products under the [Connect](https://github.com/Judgernaut777/Connect)
-umbrella, alongside **AgentConnect** (the work ledger), **BrainConnect** (memory — WikiBrain,
-mid-rename), and **ComputeConnect** (local inference — a reserved name). Connect's
-`COMPATIBILITY.md` is the intended canonical cross-ecosystem reference; this repository should
-link to it rather than duplicate it.
-
-⚠️ **Connect currently lists ToolConnect as a reserved name with no scope**, and its stated policy
-is that a reserved name gets no prose. This document is prose. That contradiction is open question
-1 in [ARCHITECTURE §9](docs/ARCHITECTURE.md#9-open-questions) and is the user's to resolve.
+umbrella, alongside **AgentConnect** (the work ledger — release candidate), **BrainConnect**
+(the trusted memory ledger, formerly WikiBrain — rename complete), and **ComputeConnect**
+(privacy-aware local compute placement — MVP). All four ship runtimes; Connect pins each
+product's exact commit and last-verified gate in its ecosystem manifest
+(`manifest/ecosystem.yaml`), and its `COMPATIBILITY.md` is the canonical cross-ecosystem
+reference — this repository links to it rather than duplicating it. AgentConnect consumes
+ToolConnect through a first-class `ToolConnectGovernor` (adopted contract v1.0).
 
 ToolConnect follows the discipline the AgentConnect specs established:
 
