@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased — MCP enforcement gateway (`toolconnect gateway`)
+
+Adds the optional Policy Enforcement Point: `toolconnect gateway` is an MCP stdio proxy in
+front of exactly one downstream MCP server that runs authorize → redeem → forward →
+record-outcome for every `tools/call`, answers `tools/list` filtered to the catalog's
+asserted+invocable tools, passes through only the enumerated handshake plumbing
+(`initialize`, `ping`, `notifications/initialized`), and refuses everything else. The
+decision core stays a PDP: the gateway uses `ToolConnectService` in-process and unmodified,
+and still implements no tool of its own. Rationale and boundary rulings in
+`docs/adr/0003-mcp-enforcement-gateway.md`; the README's brokerage-boundary and
+honest-positioning sections and `docs/STATUS.md` are reconciled with the new component.
+
+### Added
+
+* `toolconnect.gateway` module + `toolconnect gateway` CLI subcommand, with an end-to-end
+  suite driving a real downstream MCP server subprocess
+  (`fixtures/callable_mcp_server.py`) and a real-subprocess smoke test of the CLI itself.
+* Fail-closed resource bounds on the enforcement point: per-frame size caps on both the
+  client and downstream streams (an oversized frame is refused, never buffered without
+  bound), a `tools/list` pagination page cap plus repeated-cursor cycle detection, and a
+  cap on the accumulated listing size — a misbehaving downstream can no longer wedge the
+  single-threaded gateway or exhaust its memory.
+* Downstream-initiated JSON-RPC requests (e.g. `sampling/createMessage`) are answered with
+  an explicit method-not-found refusal instead of being silently dropped, so a downstream
+  blocked on that reply is never deadlocked.
+
+### Fixed
+
+* A non-`ServiceError` fault while recording a post-execution outcome (e.g. a transient
+  `sqlite3.OperationalError: database is locked`) no longer discards an already-successful
+  downstream result: outcome recording is unconditionally best-effort (the fault is logged
+  to stderr), so the client always receives the real result of a call that actually
+  executed — closing a double-execution-on-retry risk.
+* A downstream spawn failure at gateway startup now exits with one actionable error line
+  and still closes the store, instead of leaking the store handle and dumping a traceback.
+
 ## Unreleased — argument-bound one-use grants (contract 1.0 → 1.1)
 
 Moves authorization from worker-dispatch time to the **final invocation boundary**.

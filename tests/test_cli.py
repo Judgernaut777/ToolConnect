@@ -91,6 +91,76 @@ class TestCli:
         assert out.stderr.strip().count("\n") == 0
 
 
+class TestGatewayCli:
+    """The `toolconnect gateway` subcommand run as a real subprocess — end-to-end
+    coverage of the CLI wiring itself (arg parsing, config/policy loading, the
+    downstream REMAINDER handling, store cleanup), not just the Gateway class."""
+
+    ALLOW_READS = (
+        '@id("allow-reads")\n'
+        'permit(principal, action == Action::"invoke", resource)\n'
+        'when { resource.effect == "read" };\n'
+    )
+
+    def _prepare(self, tmp_path):
+        from toolconnect.policy import CedarPolicyEngine
+        from toolconnect.service import ToolConnectService
+        from toolconnect.store import SqliteStore
+        db = tmp_path / "tc.db"
+        pol = tmp_path / "policies.cedar"
+        pol.write_text(self.ALLOW_READS)
+        store = SqliteStore(db)
+        svc = ToolConnectService(store, CedarPolicyEngine(self.ALLOW_READS))
+        svc.register_source("downstream-1", "known")
+        svc.ingest_payload("downstream-1",
+                           [{"name": "reader", "claimed": {"read_only_hint": True}}])
+        svc.assert_tool("downstream-1", "reader",
+                        {"effect": "read", "asserted_by": "op"})
+        store.close()
+        return db, pol
+
+    def test_gateway_end_to_end_over_real_stdio(self, tmp_path):
+        import json
+        db, pol = self._prepare(tmp_path)
+        fixture = REPO / "fixtures" / "callable_mcp_server.py"
+        env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+        client_session = "\n".join([
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                   "clientInfo": {"name": "cli-test", "version": "0"}}}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                        "params": {"name": "reader", "arguments": {"path": "/x"}}}),
+        ]) + "\n"
+        proc = subprocess.run(
+            [sys.executable, "-m", "toolconnect.cli", "gateway",
+             "--db", str(db), "--policies", str(pol),
+             "--principal-id", "agent-1", "--source-id", "downstream-1",
+             "--", sys.executable, str(fixture)],
+            input=client_session, capture_output=True, text=True, env=env, timeout=120)
+        assert proc.returncode == 0, proc.stderr
+        replies = [json.loads(ln) for ln in proc.stdout.splitlines() if ln.strip()]
+        assert len(replies) == 2
+        assert replies[0]["result"]["serverInfo"]["name"] == "callable-mcp-fixture"
+        assert (replies[1]["result"]["structuredContent"]["echoed_arguments"]
+                == {"path": "/x"})
+
+    def test_gateway_spawn_failure_is_a_clean_refusal_not_a_traceback(self, tmp_path):
+        db, pol = self._prepare(tmp_path)
+        out = _run("gateway", "--db", str(db), "--policies", str(pol),
+                   "--principal-id", "agent-1", "--source-id", "downstream-1",
+                   "--", "/no/such/binary-xyz")
+        assert out.returncode != 0
+        assert "could not start downstream command" in out.stderr
+        assert "Traceback" not in out.stderr
+
+    def test_gateway_requires_a_downstream_command(self, tmp_path):
+        db, pol = self._prepare(tmp_path)
+        out = _run("gateway", "--db", str(db), "--policies", str(pol),
+                   "--principal-id", "agent-1", "--source-id", "downstream-1")
+        assert out.returncode != 0
+        assert "downstream command" in out.stderr
+
+
 class TestExamples:
     def test_example_policy_set_parses(self):
         from toolconnect.policy import CedarPolicyEngine

@@ -220,6 +220,25 @@ distinct and that bare-name resolution fails closed on the ambiguity. Discovery,
 normalization, and all six fault classes are exercised against both
 (`tests/test_multi_server.py`, `demo_multi_server.py`).
 
+## MCP enforcement gateway
+
+```
+toolconnect gateway --db X --policies Y --principal-id P --source-id SID -- <downstream command...>
+```
+
+An optional stdio proxy in front of **one** downstream MCP server command. It speaks MCP
+to whatever spawned it and, for every `tools/call`, runs
+`authorize(args=...) -> redeem_grant -> forward -> record_outcome` before the downstream
+server ever sees the call — a deny, a redeem denial, or a malformed request refuses
+without forwarding. `tools/list` is answered from the downstream server's own listing,
+filtered to tools this gateway's catalog currently has asserted and invocable.
+`initialize`/`ping`/`notifications/initialized` pass through verbatim (provably
+side-effect-free protocol plumbing); every other MCP method is refused rather than
+forwarded. Uses `ToolConnectService` in-process — same object `serve` wraps, no second
+decision core, no HTTP hop. Full design and the "still not an `invoke()`" reasoning:
+[docs/adr/0003-mcp-enforcement-gateway.md](adr/0003-mcp-enforcement-gateway.md). Tested
+end-to-end against a real `tools/call`-capable fixture server in `tests/test_gateway.py`.
+
 ## Amendments over the Phase 1 prototype
 
 1. **Stable claim fingerprints.** `Catalog._fingerprint` previously used the builtin
@@ -323,10 +342,15 @@ an allow. There is no `invoke`. See `docs/AGENTCONNECT_CONTRACT.md` → *Referen
 * Active health probing (ARCHITECTURE §4.6) is not implemented; drift uses the last
   discovery observation.
 * Single box: no multi-writer or multi-node coordination beyond the internal lock + WAL.
-* Argument-bound grants (contract 1.1) are a PDP boundary, not a proxy: ToolConnect can
-  make skipping `redeem` before execution *detectable* (a dangling grant, auditable via
-  `GET /grants?state=issued`) but cannot *prevent* a caller that never calls redeem, nor
-  a caller that mutates its arguments after a successful redeem. Cedar policy itself is
-  process-static (loaded once, at engine construction) — if policy hot-reload is ever
-  added, `redeem`'s `invocable_check` will need to re-evaluate policy too, not just the
-  catalog's assertion state.
+* Argument-bound grants (contract 1.1) are, on their own, a PDP boundary rather than a
+  proxy: ToolConnect can make skipping `redeem` before execution *detectable* (a
+  dangling grant, auditable via `GET /grants?state=issued`) but cannot *prevent* a
+  caller that integrates directly against `authorize`/`redeem` and never calls redeem, nor
+  a caller that mutates its arguments after a successful redeem. The `gateway` (above)
+  closes this specific gap for any caller willing to run its tool traffic through it —
+  it physically forwards the call, so skipping authorize/redeem is not an option for a
+  gateway-routed caller — but a caller that talks to a downstream MCP server directly,
+  bypassing the gateway, is outside what any component in this repo can enforce. Cedar
+  policy itself is process-static (loaded once, at engine construction) — if policy
+  hot-reload is ever added, both `redeem`'s `invocable_check` and the gateway would need
+  to re-evaluate policy too, not just the catalog's assertion state.
