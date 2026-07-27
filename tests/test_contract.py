@@ -49,7 +49,7 @@ def service(tmp_path):
 
 class TestDecisionContract:
     def test_version_is_pinned(self):
-        assert DECISION_CONTRACT_VERSION == "1.0"
+        assert DECISION_CONTRACT_VERSION == "1.1"
 
     def test_allow_shape_is_exact(self, service):
         d = service.authorize({"id": "a"}, "s", "reader")
@@ -58,7 +58,7 @@ class TestDecisionContract:
         assert d["determining_policies"] == ["allow-reads"]
         assert d["default_deny"] is False
         assert d["errors"] == []
-        assert d["contract_version"] == "1.0"
+        assert d["contract_version"] == "1.1"
         assert isinstance(d["decision_id"], str) and d["decision_id"]
 
     def test_explicit_deny_shape(self, service):
@@ -69,32 +69,62 @@ class TestDecisionContract:
         assert d["allowed"] is False
         assert d["default_deny"] is True
         assert d["determining_policies"] == []
-        assert d["contract_version"] == "1.0"
+        assert d["contract_version"] == "1.1"
 
     def test_unknown_tool_deny_shape(self, service):
         d = service.authorize({"id": "a"}, "s", "ghost")
         assert frozenset(d) == DECISION_KEYS
         assert d["allowed"] is False
         assert "unknown tool" in d["reason"]
-        assert d["contract_version"] == "1.0"
+        assert d["contract_version"] == "1.1"
 
-    def test_explicit_forbid_is_distinct_from_default_deny(self, tmp_path):
-        forbid_policy = """
+
+class TestGrantContract:
+    """Contract 1.1: argument-bound grants are additive over the 1.0 shape."""
+
+    GRANT_KEYS = frozenset({"grant_id", "args_hash", "expires_at", "ttl_seconds"})
+
+    def test_allow_with_args_key_set_is_additive(self, service):
+        d = service.authorize({"id": "a"}, "s", "reader", args={"x": 1})
+        assert frozenset(d) == DECISION_KEYS | {"grant"}
+        assert d["contract_version"] == "1.1"
+        assert d["grant"] is not None
+        assert frozenset(d["grant"]) == self.GRANT_KEYS
+
+    def test_deny_with_args_grant_is_null(self, service):
+        d = service.authorize({"id": "a"}, "s", "writer", args={"x": 1})
+        assert frozenset(d) == DECISION_KEYS | {"grant"}
+        assert d["allowed"] is False
+        assert d["grant"] is None
+
+    def test_redeem_response_key_set_is_pinned(self, service):
+        d = service.authorize({"id": "a"}, "s", "reader", args={"x": 1})
+        r = service.redeem_grant(d["grant"]["grant_id"], {"id": "a"}, {"x": 1})
+        assert frozenset(r) == {
+            "grant_id", "decision_id", "redeemed", "reason",
+            "source_id", "name", "contract_version",
+        }
+        assert r["redeemed"] is True
+        assert r["contract_version"] == "1.1"
+
+
+def test_explicit_forbid_is_distinct_from_default_deny(tmp_path):
+    forbid_policy = """
 @id("forbid-writes")
 forbid(principal, action == Action::"invoke", resource)
 when { resource.effect == "write" };
 @id("allow-all")
 permit(principal, action == Action::"invoke", resource);
 """
-        store = SqliteStore(tmp_path / "f.db")
-        svc = ToolConnectService(store, CedarPolicyEngine(forbid_policy))
-        svc.register_source("s", tier="known")
-        svc.ingest_payload("s", [{"name": "w",
-                                  "claimed": {"read_only_hint": False,
-                                              "destructive_hint": False}}])
-        svc.assert_tool("s", "w", {"effect": "write", "asserted_by": "op"})
-        d = svc.authorize({"id": "a"}, "s", "w")
-        assert d["allowed"] is False
-        assert d["default_deny"] is False  # a rule fired
-        assert d["determining_policies"] == ["forbid-writes"]
-        store.close()
+    store = SqliteStore(tmp_path / "f.db")
+    svc = ToolConnectService(store, CedarPolicyEngine(forbid_policy))
+    svc.register_source("s", tier="known")
+    svc.ingest_payload("s", [{"name": "w",
+                              "claimed": {"read_only_hint": False,
+                                          "destructive_hint": False}}])
+    svc.assert_tool("s", "w", {"effect": "write", "asserted_by": "op"})
+    d = svc.authorize({"id": "a"}, "s", "w")
+    assert d["allowed"] is False
+    assert d["default_deny"] is False  # a rule fired
+    assert d["determining_policies"] == ["forbid-writes"]
+    store.close()

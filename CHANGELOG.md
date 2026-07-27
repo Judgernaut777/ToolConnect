@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — argument-bound one-use grants (contract 1.0 → 1.1)
+
+Moves authorization from worker-dispatch time to the **final invocation boundary**.
+`authorize` may now bind exact final call arguments (a canonical-JSON SHA-256
+`args_hash`) and, on allow, issue a one-use grant; a new `redeem` step atomically
+consumes it immediately before execution — a second redeem, an args mismatch, expiry, a
+principal mismatch, or the tool becoming non-invocable since issue all deny, fail-closed
+and by reason. Fully additive: `authorize` with no `args` is byte-identical to contract
+1.0 (`EXPECTED_CONTRACT_MAJOR` stays `"1"`; the unmodified `DECISION_KEYS` golden fixture
+is the proof). ToolConnect is still never in the invocation data path — no `invoke` was
+added. Rationale, rulings, and closed gaps in `docs/adr/0002-argument-bound-grants.md`.
+
+**Schema is now v4 — a one-way door.** A database migrated to v4 (the new `grants`
+table) cannot be opened by an older ToolConnect binary; it refuses via
+`SchemaTooNewError`, the same fail-closed posture as every prior schema bump.
+
+### Added
+
+* **`toolconnect.hashing`**: the one canonicalization/hashing implementation for
+  argument-bound grants, used server-side on both the issue and redeem paths. No client,
+  in either repo, ever computes or transmits a hash.
+* **`POST /grants/{id}/redeem`**, **`POST /grants/{id}/close`**, **`GET /grants/{id}`**,
+  **`GET /grants?state=&limit=`**: the grant lifecycle's HTTP surface. `outcome` gains an
+  optional `grant_id` that closes the grant in the same call.
+* **`DECISION_CONTRACT_VERSION` bumped `1.0` → `1.1`**, additively: `authorize` gains
+  optional `args`/`ttl_seconds`; the response gains an optional `grant` key, present iff
+  `args` was sent (the mixed-fleet stale-server detector).
+* **Client SDK**: `ToolConnectClient.redeem`/`.close_grant`, and a new
+  `governed_invoke(principal, source_id, name, args, executor, ...)` helper implementing
+  authorize → redeem → execute → outcome, fail-closed at every step before execution.
+* **`self._authz_lock`** in `ToolConnectService`: closes a latent decision-id race under
+  concurrent in-process `authorize` calls (the HTTP server was already safe via its
+  global handler lock; an in-process embedder was not) — found while designing the
+  grant feature, fixed for both callers.
+
 ## Unreleased — production hardening (from v0.1.0-rc1)
 
 Hardening pass for the Connect production-readiness program. ToolConnect is still a

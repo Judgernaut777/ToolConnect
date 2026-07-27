@@ -172,6 +172,50 @@ class TestClientFailClosed:
             c.authorize({"id": "a"}, "s", "reader")
         assert "contract" in str(exc.value).lower()
 
+    def test_redeem_incompatible_contract_major_fails_closed(self):
+        """redeem() must apply the same contract-major discipline as authorize():
+        a future-major server reusing the "redeemed" field name must never be read
+        as a genuine redemption — this is the one boundary where getting it wrong
+        executes a tool."""
+        c = ToolConnectClient("http://127.0.0.1:1", timeout=1.0)
+        c._request = lambda method, path, body=None: (200, {  # server double
+            "grant_id": "g-1", "decision_id": "d-1", "redeemed": True,
+            "reason": "ok", "source_id": "s", "name": "reader",
+            "contract_version": "9.0",
+        })
+        with pytest.raises(ToolConnectUnavailable) as exc:
+            c.redeem("g-1", {"id": "a"}, {"x": 1})
+        assert "contract" in str(exc.value).lower()
+
+    def test_governed_invoke_refuses_on_redeem_contract_major_mismatch(self):
+        """Through governed_invoke, a wrong-major redeem response must refuse
+        BEFORE the executor runs, even though the double said redeemed=True."""
+        c = ToolConnectClient("http://127.0.0.1:1", timeout=1.0)
+
+        def fake_request(method, path, body=None):
+            if path == "/authorize":
+                return 200, {
+                    "allowed": True, "reason": "ok", "decision_id": "d-1",
+                    "contract_version": "1.1",
+                    "grant": {"grant_id": "g-1", "args_hash": "h",
+                              "expires_at": "9999-01-01T00:00:00+00:00",
+                              "ttl_seconds": 60},
+                }
+            if path.endswith("/redeem"):
+                return 200, {
+                    "grant_id": "g-1", "decision_id": "d-1", "redeemed": True,
+                    "reason": "ok", "source_id": "s", "name": "reader",
+                    "contract_version": "9.0",
+                }
+            return 200, {}  # best-effort cleanup calls (close/outcome)
+
+        c._request = fake_request
+        ran = []
+        with pytest.raises(ToolConnectUnavailable):
+            c.governed_invoke({"id": "a"}, "s", "reader", {"x": 1},
+                              lambda a: ran.append(a))
+        assert ran == []  # the executor never ran
+
     def test_from_json_defaults_to_deny(self):
         # An empty/garbled body is a deny, structurally.
         assert ClientDecision.from_json({}).allowed is False

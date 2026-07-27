@@ -26,19 +26,23 @@ mapping/env with :meth:`ToolConnectClient.from_config`.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 __all__ = [
     "ToolConnectClient",
     "ClientDecision",
+    "ClientGrant",
+    "ClientRedemption",
     "ToolConnectError",
     "ToolConnectUnavailable",
     "ToolConnectDenied",
+    "GrantRedeemDenied",
 ]
 
 
@@ -62,6 +66,38 @@ class ToolConnectDenied(ToolConnectError):
         self.decision = decision
 
 
+class GrantRedeemDenied(ToolConnectError):
+    """Raised by :meth:`ToolConnectClient.governed_invoke` when redeem refused a grant."""
+
+    def __init__(self, redemption: "ClientRedemption") -> None:
+        super().__init__(redemption.reason or "grant redeem denied")
+        self.redemption = redemption
+
+
+@dataclass(frozen=True)
+class ClientGrant:
+    """The client-side view of an argument-bound one-use grant (contract 1.1)."""
+
+    grant_id: str
+    args_hash: str = ""
+    expires_at: str = ""
+    ttl_seconds: int = 0
+
+
+@dataclass(frozen=True)
+class ClientRedemption:
+    """The client-side view of a ``/grants/{id}/redeem`` response."""
+
+    redeemed: bool
+    reason: str = ""
+    grant_id: str = ""
+    decision_id: str = ""
+    source_id: str = ""
+    name: str = ""
+    contract_version: str = ""
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class ClientDecision:
     """The client-side view of a ToolConnect Decision.
@@ -78,6 +114,7 @@ class ClientDecision:
     default_deny: bool = False
     errors: tuple[str, ...] = ()
     contract_version: str = ""
+    grant: ClientGrant | None = None
     raw: Mapping[str, Any] = field(default_factory=dict)
 
     @property
@@ -87,6 +124,15 @@ class ClientDecision:
     @classmethod
     def from_json(cls, body: Mapping[str, Any]) -> "ClientDecision":
         # Fail closed: anything we cannot read as an explicit allow is a deny.
+        grant_raw = body.get("grant")
+        grant = None
+        if isinstance(grant_raw, dict):
+            grant = ClientGrant(
+                grant_id=str(grant_raw.get("grant_id", "")),
+                args_hash=str(grant_raw.get("args_hash", "")),
+                expires_at=str(grant_raw.get("expires_at", "")),
+                ttl_seconds=int(grant_raw.get("ttl_seconds", 0) or 0),
+            )
         return cls(
             allowed=bool(body.get("allowed", False)),
             reason=str(body.get("reason", "")),
@@ -95,6 +141,7 @@ class ClientDecision:
             default_deny=bool(body.get("default_deny", False)),
             errors=tuple(str(e) for e in (body.get("errors", ()) or ())),
             contract_version=str(body.get("contract_version", "")),
+            grant=grant,
             raw=dict(body),
         )
 
@@ -199,7 +246,9 @@ class ToolConnectClient:
     # -- decision surface -------------------------------------------------------
 
     def authorize(self, principal: Mapping[str, Any], source_id: str, name: str,
-                  context: Mapping[str, Any] | None = None) -> ClientDecision:
+                  context: Mapping[str, Any] | None = None, *,
+                  args: Mapping[str, Any] | None = None,
+                  ttl_seconds: int | None = None) -> ClientDecision:
         """Ask whether ``principal`` may call ``(source_id, name)``.
 
         Returns a :class:`ClientDecision`. A *deny* is a normal return value with
@@ -208,10 +257,21 @@ class ToolConnectClient:
         server on an incompatible contract major) raises
         :class:`ToolConnectUnavailable`. There is no path that returns ``allowed=True``
         on failure.
+
+        When ``args`` is given (contract 1.1), the decision binds those exact final
+        arguments: on allow, the server issues a one-use grant (``decision.grant``)
+        that must be redeemed via :meth:`redeem` immediately before the call actually
+        executes. ``ttl_seconds`` is meaningless without ``args`` and is rejected by
+        the server if given without it.
         """
-        body = {"principal": dict(principal), "source_id": source_id, "name": name}
+        body: dict[str, Any] = {
+            "principal": dict(principal), "source_id": source_id, "name": name}
         if context is not None:
             body["context"] = dict(context)
+        if args is not None:
+            body["args"] = dict(args)
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = ttl_seconds
         status, payload = self._request("POST", "/authorize", body)
         if status != 200 or not isinstance(payload, dict) or "allowed" not in payload:
             raise ToolConnectUnavailable(
@@ -237,15 +297,126 @@ class ToolConnectClient:
             raise ToolConnectDenied(decision)
         return decision
 
+    def redeem(self, grant_id: str, principal: Mapping[str, Any],
+              args: Mapping[str, Any]) -> ClientRedemption:
+        """Atomically consume a one-use grant immediately before executing the call.
+
+        Resubmits the raw ``args`` — the server is the only hasher, so the client
+        never learns or re-derives the canonicalization rule. Any transport failure,
+        non-200, or a body missing ``"redeemed"`` raises :class:`ToolConnectUnavailable`
+        rather than returning a redeemed result — there is no path back to the caller
+        that looks like success without the server's explicit say-so.
+        """
+        body = {"principal": dict(principal), "args": dict(args)}
+        status, payload = self._request("POST", f"/grants/{grant_id}/redeem", body)
+        if status != 200 or not isinstance(payload, dict) or "redeemed" not in payload:
+            raise ToolConnectUnavailable(
+                f"/grants/{grant_id}/redeem returned {status}: {payload!r}")
+        cv = str(payload.get("contract_version", ""))
+        major = (cv or "0").split(".", 1)[0]
+        if cv and major != self.EXPECTED_CONTRACT_MAJOR:
+            # Same fail-closed discipline as authorize(): a future server on an
+            # incompatible major could reuse the "redeemed" field name with different
+            # semantics — never let that read as a genuine redemption at the one
+            # boundary where getting it wrong executes a tool.
+            raise ToolConnectUnavailable(
+                f"redeem response contract v{cv} is incompatible with "
+                f"client-expected major {self.EXPECTED_CONTRACT_MAJOR}")
+        return ClientRedemption(
+            redeemed=payload.get("redeemed") is True,
+            reason=str(payload.get("reason", "")),
+            grant_id=str(payload.get("grant_id", grant_id)),
+            decision_id=str(payload.get("decision_id") or ""),
+            source_id=str(payload.get("source_id") or ""),
+            name=str(payload.get("name") or ""),
+            contract_version=str(payload.get("contract_version", "")),
+            raw=dict(payload),
+        )
+
+    def close_grant(self, grant_id: str, reason: str = "explicit_close") -> dict:
+        """Explicitly close a grant (e.g. abandon-in-``finally``). Idempotent."""
+        status, payload = self._request(
+            "POST", f"/grants/{grant_id}/close", {"reason": reason})
+        if status != 200 or not isinstance(payload, dict):
+            raise ToolConnectUnavailable(
+                f"closing grant {grant_id} returned {status}: {payload!r}")
+        return payload
+
     def record_outcome(self, decision_id: str, outcome: str,
-                       detail: Mapping[str, Any] | None = None) -> dict:
-        """Close the loop on an issued decision (contract §3: ``record()``)."""
+                       detail: Mapping[str, Any] | None = None,
+                       grant_id: str | None = None) -> dict:
+        """Close the loop on an issued decision (contract §3: ``record()``).
+
+        ``grant_id``, when given, closes that grant in the same call (contract 1.1).
+        """
         body: dict[str, Any] = {"outcome": outcome}
         if detail is not None:
             body["detail"] = dict(detail)
+        if grant_id is not None:
+            body["grant_id"] = grant_id
         status, payload = self._request(
             "POST", f"/decisions/{decision_id}/outcome", body)
         if status != 200 or not isinstance(payload, dict):
             raise ToolConnectUnavailable(
                 f"recording outcome for {decision_id} returned {status}: {payload!r}")
         return payload
+
+    # -- governed invocation ------------------------------------------------------
+
+    def governed_invoke(self, principal: Mapping[str, Any], source_id: str, name: str,
+                        args: Mapping[str, Any], executor: Callable[[Mapping[str, Any]], Any], *,
+                        context: Mapping[str, Any] | None = None,
+                        ttl_seconds: int | None = None) -> Any:
+        """authorize(final args) -> redeem -> executor(frozen_args) -> outcome.
+
+        This is the governed-invoke helper: ANY failure before execution refuses
+        (raises) — fail-closed. ToolConnect never carries the request; ``executor`` is
+        the caller's own invocation, called with the exact deep-copied mapping that was
+        hashed and redeemed, so a caller mutating its own ``args`` after the call
+        starts cannot desynchronize what was authorized from what runs.
+
+        Raises :class:`ToolConnectDenied` on an authorize-deny, :class:`GrantRedeemDenied`
+        on a redeem-deny, :class:`ToolConnectUnavailable` on a stale pre-1.1 server (an
+        allow with no grant) or any transport failure. If ``executor`` raises, the
+        original exception propagates; best-effort cleanup (close the grant, record an
+        "error" outcome) is attempted first and never masks it. After a successful
+        execution, outcome reporting is best-effort — an audit-path outage never
+        destroys a result that already executed.
+        """
+        frozen = copy.deepcopy(dict(args))
+        decision = self.authorize(principal, source_id, name, context=context,
+                                  args=frozen, ttl_seconds=ttl_seconds)
+        if not decision.allowed:
+            raise ToolConnectDenied(decision)
+        if decision.grant is None:
+            # Mixed-fleet rule: allow-without-grant when args were sent is not a usable
+            # allow — either a pre-1.1 server silently dropped `args`, or this build's
+            # own invariant broke. Either way, refuse rather than execute ungoverned.
+            raise ToolConnectUnavailable(
+                "authorize allowed but issued no grant (server pre-1.1?)")
+        grant = decision.grant
+        try:
+            redemption = self.redeem(grant.grant_id, principal, frozen)
+            if not redemption.redeemed:
+                raise GrantRedeemDenied(redemption)
+            if (redemption.source_id and redemption.source_id != source_id) or (
+                    redemption.name and redemption.name != name):
+                raise ToolConnectUnavailable(
+                    f"redeemed grant is for {redemption.source_id}:{redemption.name}, "
+                    f"expected {source_id}:{name}")
+            result = executor(frozen)
+        except BaseException:
+            try:
+                self.close_grant(grant.grant_id, "aborted")
+            except ToolConnectError:
+                pass
+            try:
+                self.record_outcome(decision.decision_id, "error", grant_id=grant.grant_id)
+            except ToolConnectError:
+                pass
+            raise
+        try:
+            self.record_outcome(decision.decision_id, "executed", grant_id=grant.grant_id)
+        except ToolConnectError:
+            pass  # post-execution audit outage never destroys the result
+        return result

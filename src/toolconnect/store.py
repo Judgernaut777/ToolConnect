@@ -28,7 +28,7 @@ import threading
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from .catalog import AssertionRecord, Catalog, ToolId
 from .descriptor import (
@@ -50,7 +50,7 @@ BASELINE_VERSION = 1
 #: The current schema version. A database at an older version is migrated forward on
 #: open (see ``_MIGRATIONS``); a database at a *newer* version is refused, because this
 #: code cannot know what a future migration changed.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class SchemaTooNewError(RuntimeError):
@@ -145,6 +145,10 @@ CREATE TABLE IF NOT EXISTS audit (
 #: and the hash chain itself is untouched, so a migrated database verifies as before.
 #: (An empty audit table selects no rows, so no head row is written — correct: an empty
 #: chain has no head to truncate to.)
+#: v4 (this release): argument-bound one-use grants (``grants`` table). A grant row is
+#: never deleted (auditable dangling-grant detection), and no raw call arguments are
+#: ever stored here — only their hash. Purely additive: a new table plus an index, no
+#: existing column or row touched, so a migrated database's hash chain is unaffected.
 _MIGRATIONS: dict[int, list[str]] = {
     2: [
         "ALTER TABLE sources ADD COLUMN label TEXT",
@@ -155,6 +159,20 @@ _MIGRATIONS: dict[int, list[str]] = {
         "SELECT 'audit_head_seq', CAST(seq AS TEXT) FROM audit ORDER BY seq DESC LIMIT 1",
         "INSERT OR REPLACE INTO meta(key, value) "
         "SELECT 'audit_head_hash', record_hash FROM audit ORDER BY seq DESC LIMIT 1",
+    ],
+    4: [
+        "CREATE TABLE IF NOT EXISTS grants ("
+        " grant_id     TEXT PRIMARY KEY,"
+        " decision_id  TEXT NOT NULL,"
+        " principal_id TEXT NOT NULL,"
+        " source_id    TEXT NOT NULL,"
+        " name         TEXT NOT NULL,"
+        " args_hash    TEXT NOT NULL,"
+        " issued_at    TEXT NOT NULL,"
+        " expires_at   TEXT NOT NULL,"
+        " redeemed_at  TEXT,"
+        " closed_at    TEXT)",
+        "CREATE INDEX IF NOT EXISTS idx_grants_decision ON grants(decision_id)",
     ],
 }
 
@@ -548,3 +566,159 @@ class SqliteStore:
                     f"tail truncation: recorded head seq {recorded_seq} "
                     f"but chain ends at seq {actual_seq}")
         return ChainVerification(True, count)
+
+    # -- grants -----------------------------------------------------------------
+    #
+    # An argument-bound, one-use grant issued alongside an ``allow`` decision when the
+    # caller supplied final ``args`` to authorize. ``status`` is deliberately NOT a
+    # stored column — it is always computed from the timestamp latches below, so a
+    # stored value can never silently disagree with its own timestamps (the same
+    # doctrine as ``load_catalog`` re-deriving assertion validity rather than trusting
+    # a persisted flag). No raw call arguments are ever persisted here — only their
+    # hash. Rows are never deleted, so a dangling (issued, never redeemed or closed)
+    # grant remains auditable via ``list_grants``.
+
+    @staticmethod
+    def _grant_status(expires_at: str, redeemed_at: str | None,
+                      closed_at: str | None, now: datetime | None = None) -> str:
+        if closed_at is not None:
+            return "closed"
+        if redeemed_at is not None:
+            return "redeemed"
+        now = now or datetime.now(timezone.utc)
+        if datetime.fromisoformat(expires_at) <= now:
+            return "expired"
+        return "issued"
+
+    def issue_grant(self, *, grant_id: str, decision_id: str, principal_id: str,
+                    source_id: str, name: str, args_hash: str,
+                    issued_at: str, expires_at: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO grants(grant_id, decision_id, principal_id, source_id, "
+                "name, args_hash, issued_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+                (grant_id, decision_id, principal_id, source_id, name,
+                 args_hash, issued_at, expires_at))
+
+    def get_grant(self, grant_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT grant_id, decision_id, principal_id, source_id, name, "
+                "args_hash, issued_at, expires_at, redeemed_at, closed_at "
+                "FROM grants WHERE grant_id=?", (grant_id,)).fetchone()
+        if row is None:
+            return None
+        return self._grant_row_to_dict(row)
+
+    def _grant_row_to_dict(self, row: tuple) -> dict:
+        (grant_id, decision_id, principal_id, source_id, name, args_hash,
+         issued_at, expires_at, redeemed_at, closed_at) = row
+        return {
+            "grant_id": grant_id, "decision_id": decision_id,
+            "principal_id": principal_id, "source_id": source_id, "name": name,
+            "args_hash": args_hash, "issued_at": issued_at, "expires_at": expires_at,
+            "redeemed_at": redeemed_at, "closed_at": closed_at,
+            "status": self._grant_status(expires_at, redeemed_at, closed_at),
+        }
+
+    def redeem_grant(self, grant_id: str, *, args_hash: str, principal_id: str,
+                     invocable_check: Callable[[str, str], bool] | None = None) -> dict:
+        """Atomically consume a one-use grant. Every branch is an explicit deny.
+
+        Returns ``{"redeemed": bool, "reason": str, "decision_id": str | None,
+        "source_id": str | None, "name": str | None}``. ``reason`` is one of
+        ``ok``, ``not_found``, ``already_redeemed``, ``closed``, ``expired``,
+        ``principal_mismatch``, ``args_mismatch``, ``not_invocable``.
+
+        ``BEGIN IMMEDIATE``/``COMMIT``/``ROLLBACK`` are issued manually (not via the
+        ``with self._conn:`` idiom) so this method never touches the connection's
+        ``isolation_level`` — which would change ``append_audit``'s atomicity — and so
+        every branch, including the ones that must close the grant before denying
+        (``not_invocable``), controls its own transaction boundary explicitly. This is
+        redundant with the process-wide ``self._lock`` today; it is deliberate
+        defense-in-depth against any future second writer to this database file.
+        """
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            # The expiry clock is read AFTER the lock and transaction are held, so a
+            # redeem that queued behind another grant operation (or a slow
+            # invocable_check) for longer than the remaining TTL is judged against
+            # the time the check actually runs — a pre-queue snapshot would let an
+            # already-expired grant redeem, violating inclusive-deny.
+            now = datetime.now(timezone.utc)
+            try:
+                row = self._conn.execute(
+                    "SELECT decision_id, principal_id, source_id, name, args_hash, "
+                    "expires_at, redeemed_at, closed_at FROM grants WHERE grant_id=?",
+                    (grant_id,)).fetchone()
+
+                def _deny(reason: str, did: str | None = None, sid: str | None = None,
+                          nm: str | None = None) -> dict:
+                    self._conn.execute("ROLLBACK")
+                    return {"redeemed": False, "reason": reason, "decision_id": did,
+                            "source_id": sid, "name": nm}
+
+                if row is None:
+                    return _deny("not_found")
+                (did, g_principal, sid, nm, g_hash, expires_at,
+                 redeemed_at, closed_at) = row
+                if redeemed_at is not None:
+                    return _deny("already_redeemed", did, sid, nm)
+                if closed_at is not None:
+                    return _deny("closed", did, sid, nm)
+                if datetime.fromisoformat(expires_at) <= now:
+                    return _deny("expired", did, sid, nm)
+                if principal_id != g_principal:
+                    return _deny("principal_mismatch", did, sid, nm)
+                if args_hash != g_hash:
+                    return _deny("args_mismatch", did, sid, nm)
+                if invocable_check is not None and not invocable_check(sid, nm):
+                    # Kill the grant permanently in the SAME transaction, then deny.
+                    self._conn.execute(
+                        "UPDATE grants SET closed_at=? WHERE grant_id=? "
+                        "AND closed_at IS NULL", (_now(), grant_id))
+                    self._conn.execute("COMMIT")
+                    return {"redeemed": False, "reason": "not_invocable",
+                            "decision_id": did, "source_id": sid, "name": nm}
+                cur = self._conn.execute(
+                    "UPDATE grants SET redeemed_at=? WHERE grant_id=? "
+                    "AND redeemed_at IS NULL AND closed_at IS NULL",
+                    (_now(), grant_id))
+                if cur.rowcount != 1:
+                    return _deny("already_redeemed", did, sid, nm)
+                self._conn.execute("COMMIT")
+                return {"redeemed": True, "reason": "ok", "decision_id": did,
+                        "source_id": sid, "name": nm}
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def close_grant(self, grant_id: str) -> dict | None:
+        """Idempotent. Returns ``{"decision_id", "already_closed"}``, or ``None`` if unknown."""
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT decision_id, closed_at FROM grants WHERE grant_id=?",
+                (grant_id,)).fetchone()
+            if row is None:
+                return None
+            if row[1] is not None:
+                return {"decision_id": row[0], "already_closed": True}
+            self._conn.execute(
+                "UPDATE grants SET closed_at=? WHERE grant_id=? AND closed_at IS NULL",
+                (_now(), grant_id))
+            return {"decision_id": row[0], "already_closed": False}
+
+    def list_grants(self, state: str | None = None, limit: int = 100) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT grant_id, decision_id, principal_id, source_id, name, "
+                "args_hash, issued_at, expires_at, redeemed_at, closed_at "
+                "FROM grants ORDER BY issued_at DESC").fetchall()
+        out = []
+        for row in rows:
+            d = self._grant_row_to_dict(row)
+            if state is None or d["status"] == state:
+                out.append(d)
+            if len(out) >= limit:
+                break
+        return out

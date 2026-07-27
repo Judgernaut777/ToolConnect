@@ -65,9 +65,13 @@ Errors are `{"error": {"status": N, "message": "..."}}`.
 | `POST /assertions` | operator vouches: `{source_id, name, descriptor}`; `descriptor.asserted_by` is required — promotion is human-only |
 | `GET /assertions/{source_id}/{name}` | assertion status, fingerprint evidence, invocability |
 | `GET /drift/{source_id}` | drift against the **last successful discovery**; `409` if no discovery was ever observed — an unobserved source has unknown drift, not none |
-| `POST /authorize` | `{principal, source_id, name, context?}` → a Decision |
-| `POST /decisions/{decision_id}/outcome` | close the loop: `{outcome, detail?}`; `detail`, when present, must be a JSON object (`400` otherwise); unknown ids are `404` |
-| `GET /audit?kind=&limit=` | newest-first audit records (kinds: `decision`, `outcome`, `ingest`, `assertion`, `drift`, `source`) |
+| `POST /authorize` | `{principal, source_id, name, context?, args?, ttl_seconds?}` → a Decision. `args` binds an argument-bound one-use grant on allow (contract 1.1); omitted, behavior is byte-identical to contract 1.0 |
+| `POST /grants/{grant_id}/redeem` | atomically consume a one-use grant immediately before executing the call: `{principal, args}` → always `200` with a decision outcome (`redeemed: true/false` + `reason`); `400` only on malformed shape |
+| `POST /grants/{grant_id}/close` | explicitly close a grant (e.g. abandon in a `finally`); idempotent; unknown id is `404` |
+| `GET /grants/{grant_id}` | one grant's stored fields plus its **computed** status (`issued`\|`redeemed`\|`expired`\|`closed`) |
+| `GET /grants?state=&limit=` | grants filtered by computed status, newest-issued-first — how an operator finds a dangling (never redeemed or closed) grant |
+| `POST /decisions/{decision_id}/outcome` | close the loop: `{outcome, detail?, grant_id?}`; `detail`, when present, must be a JSON object (`400` otherwise); unknown ids are `404`; `grant_id`, when given, closes that grant in the same call and adds `"grant_closed": true` to the response |
+| `GET /audit?kind=&limit=` | newest-first audit records (kinds: `decision`, `outcome`, `ingest`, `assertion`, `drift`, `source`, `grant_issue`, `grant_redeem`, `grant_redeem_denied`, `grant_close`) |
 | `GET /audit/verify` | walk the hash chain; reports the first broken record |
 
 ### The Decision shape
@@ -80,9 +84,28 @@ Errors are `{"error": {"status": N, "message": "..."}}`.
   "determining_policies": ["no-sensitive-reads-for-rented"],
   "default_deny": false,
   "errors": [],
-  "contract_version": "1.0"
+  "contract_version": "1.1"
 }
 ```
+
+When the caller sends `args`, an allow additionally carries a `grant`:
+
+```json
+{
+  "...": "as above, contract_version \"1.1\"",
+  "grant": {
+    "grant_id": "9c2e…",
+    "args_hash": "sha256 hex of the canonical args",
+    "expires_at": "2026-…Z",
+    "ttl_seconds": 60
+  }
+}
+```
+
+`grant` is present **iff** the request sent `args` — never omitted, `null` on a deny —
+which doubles as the mixed-fleet detector: a pre-1.1 server never sends the key at all,
+so a caller that asked for a grant and got no `grant` key back knows to refuse rather than
+execute ungoverned (see *Argument-bound one-use grants* below).
 
 `determining_policies` is empty on a **default deny** — no policy matched — and
 `default_deny` is true, which the contract requires to stay distinguishable from an
@@ -100,6 +123,73 @@ shape cannot drift silently.
 `principal` is `{id, privacy_tier?, kind?, on_behalf_of?}` and `on_behalf_of` nests
 recursively; authority is the intersection of the delegation chain
 (`Principal.effective_tier()`), so delegation cannot launder privilege.
+
+### Argument-bound one-use grants (contract 1.1)
+
+Authorization moves from worker-dispatch time to the **final invocation boundary**.
+`POST /authorize` may bind the exact final arguments the caller is about to execute
+(`args`), and — on allow — issue a one-use `grant`. Immediately before executing, the
+caller redeems that grant with the **same raw args** via `POST /grants/{id}/redeem`;
+only a successful redeem may proceed to execution. This is additive: an `/authorize`
+call with no `args` behaves exactly as contract 1.0 did.
+
+**Canonicalization (the args-hash rule).** ToolConnect is the *only* hasher — a client
+never computes or transmits a hash, it resubmits raw `args` at redeem time and the
+server re-derives the hash to compare. The rule (`toolconnect.hashing`):
+`json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+allow_nan=False)`, SHA-256 over the UTF-8 bytes. Consequences worth naming: object keys
+sort in code-point order at every nesting level; array order is significant; no Unicode
+normalization is applied (NFC and NFD forms of the same visible string hash
+differently — a documented non-goal, not a bug); `1` and `1.0` never conflate, nor do
+`5` and `"5"`; non-finite floats (`NaN`/`Infinity`) and non-string object keys are
+rejected with `400` before any audit record is written.
+
+**Grant status is always computed, never a stored authority** — `issued` /
+`redeemed` / `expired` / `closed`, derived from three timestamp latches
+(`redeemed_at`, `closed_at`, `expires_at`) exactly the way `load_catalog` re-derives
+assertion validity rather than trusting a persisted flag. Grant rows are **never
+deleted**, so a dangling (issued, never redeemed or closed) grant stays queryable via
+`GET /grants?state=issued` — that is deliberately how an operator finds a tool call
+that was authorized but never actually happened (or happened without being reported).
+**No raw call arguments are ever persisted or audited** — only the hash.
+
+**Redeem is atomic and every branch is an explicit deny** (`reason` on a non-redeem):
+`not_found`, `already_redeemed` (replay), `closed` (see below), `expired`
+(inclusive — `now >= expires_at` denies), `principal_mismatch` (a grant is bound to the
+principal that requested it, not a bearer capability — a leaked `grant_id` in a log line
+is not redeemable by someone else), `args_mismatch`, `not_invocable` (the catalog
+dropped the tool's assertion between issue and redeem — a rug-pull or drift — checked
+**inside** the same transaction that would otherwise redeem, and the grant is
+permanently closed in that same transaction rather than left redeemable later). A grant
+that has been closed (explicitly, via outcome, or by a failed `not_invocable` check)
+**cannot** subsequently redeem even if none of the other conditions would have denied
+it — close always wins.
+
+**TTL**: `ttl_seconds` is only meaningful alongside `args` (a `400` otherwise); bounds
+are `[1, 300]`, default `60`; out-of-range or non-integer (a JSON `bool` is rejected —
+`bool` is an `int` subclass in Python and would otherwise silently pass) is a `400`,
+never silently clamped.
+
+**TOCTOU, honestly stated:** ToolConnect is a PDP, not a proxy — nothing here can stop
+a caller from mutating its own arguments after a successful redeem and before it
+actually executes the call. The client SDK's `governed_invoke` helper (below) closes
+this as tightly as a non-proxying design can: it deep-copies `args` once at entry and
+uses that frozen snapshot for authorize, redeem, **and** the executor call, so the
+three can never see different arguments. Skipping redeem altogether is *detectable*
+(the grant sits dangling, auditable) but not *preventable* — the enforcement point has
+to actually call redeem for the enforcement to exist. See `docs/adr/0002-argument-bound-grants.md`.
+
+**Governed invocation (client SDK).** `toolconnect.client.ToolConnectClient.governed_invoke(
+principal, source_id, name, args, executor, *, context=None, ttl_seconds=None)` performs
+authorize(final args) → redeem → `executor(frozen_args)` → outcome, fail-closed at every
+step before execution: an authorize-deny raises `ToolConnectDenied`; a stale pre-1.1
+server (allow, no `grant` key) or a redeem-deny raises `ToolConnectUnavailable` /
+`GrantRedeemDenied` and `executor` is never called. If `executor` raises, the original
+exception propagates after best-effort cleanup (close the grant, record an `"error"`
+outcome — failures there never mask the real exception). After a successful execution,
+outcome reporting is best-effort: an audit-path outage never destroys a result that
+already ran; the grant is left visibly "redeemed but never closed" instead, which is
+truthful and auditable.
 
 ### Failure semantics (fail closed, everywhere)
 
@@ -233,3 +323,10 @@ an allow. There is no `invoke`. See `docs/AGENTCONNECT_CONTRACT.md` → *Referen
 * Active health probing (ARCHITECTURE §4.6) is not implemented; drift uses the last
   discovery observation.
 * Single box: no multi-writer or multi-node coordination beyond the internal lock + WAL.
+* Argument-bound grants (contract 1.1) are a PDP boundary, not a proxy: ToolConnect can
+  make skipping `redeem` before execution *detectable* (a dangling grant, auditable via
+  `GET /grants?state=issued`) but cannot *prevent* a caller that never calls redeem, nor
+  a caller that mutates its arguments after a successful redeem. Cedar policy itself is
+  process-static (loaded once, at engine construction) — if policy hot-reload is ever
+  added, `redeem`'s `invocable_check` will need to re-evaluate policy too, not just the
+  catalog's assertion state.

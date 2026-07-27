@@ -9,11 +9,13 @@ be recorded later. There is no `invoke()` here and never will be.
 
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from . import mcp_source
+from . import hashing, mcp_source
 from .catalog import AmbiguousToolName, AssertionStatus  # noqa: F401  (re-export convenience)
 from .descriptor import ClaimedMetadata, TrustedSource, TrustTier
 from .policy import Broker, Decision, PolicyEngine, Principal
@@ -26,7 +28,20 @@ from .store import SqliteStore, asserted_from_json, asserted_to_json  # noqa: F4
 #: additive fields keep the same major. Clients compare the MAJOR component and fail
 #: closed on a mismatch (see ``toolconnect.client.ToolConnectClient``). Pinned by a
 #: golden contract fixture in ``tests/test_contract.py``.
-DECISION_CONTRACT_VERSION = "1.0"
+#:
+#: Bumped 1.0 -> 1.1 for argument-bound one-use grants: ``authorize`` may bind exact
+#: final arguments (a canonical-JSON SHA-256 ``args_hash``) and, on permit, issue a
+#: one-use grant; a new ``/grants/{id}/redeem`` route atomically consumes it
+#: immediately before execution. Additive only — the legacy no-args key set
+#: (``DECISION_KEYS`` in tests/test_contract.py) is untouched; a ``grant`` key
+#: appears iff the caller sent ``args``.
+DECISION_CONTRACT_VERSION = "1.1"
+
+#: Grant TTL bounds and default, in seconds. Out-of-range values are refused (400),
+#: never silently clamped — this repo's idiom is to refuse rather than guess.
+DEFAULT_GRANT_TTL_SECONDS = 60
+MIN_GRANT_TTL_SECONDS = 1
+MAX_GRANT_TTL_SECONDS = 300
 
 
 class ServiceError(Exception):
@@ -35,6 +50,13 @@ class ServiceError(Exception):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
         self.status = status
+
+
+#: Sentinel distinguishing "the caller did not mention args at all" (legacy no-grant
+#: authorize) from "the caller explicitly passed args=None" (an explicit JSON `null`,
+#: which is malformed shape, not an omission) — plain ``None`` cannot carry that
+#: distinction on its own. Refuse rather than guess (R4).
+_UNSET = object()
 
 
 class _PersistentAuditLog(list):
@@ -123,6 +145,11 @@ class ToolConnectService:
         self.engine = engine
         self._audit_log = _PersistentAuditLog(store)
         self.broker = Broker(catalog=self.catalog, engine=engine, audit=self._audit_log)
+        # Held across broker-call -> decision_id read -> grant insert -> grant_issue
+        # append, so a concurrent in-process embedder (the HTTP server already
+        # serializes via one global handler lock) can never bind a grant to another
+        # call's decision_id, nor interleave a grant_issue away from its decision.
+        self._authz_lock = threading.Lock()
 
     # -- health -------------------------------------------------------------------
 
@@ -132,6 +159,7 @@ class ToolConnectService:
         return {
             "status": "ok" if chain.ok else "audit_chain_broken",
             "version": __version__,
+            "contract_version": DECISION_CONTRACT_VERSION,
             "sources": len(self.catalog.sources),
             "tools": len(self.catalog.tools),
             "audit_records": chain.records,
@@ -362,16 +390,135 @@ class ToolConnectService:
     # -- authorization ----------------------------------------------------------------
 
     def authorize(self, principal: Mapping[str, Any], source_id: str, name: str,
-                  context: Mapping[str, Any] | None = None) -> dict:
+                  context: Mapping[str, Any] | None = None,
+                  args: Mapping[str, Any] | None = _UNSET,
+                  ttl_seconds: int | None = None) -> dict:
         if context is not None and not isinstance(context, Mapping):
             raise ServiceError(400, "context must be a JSON object")
+        # `args` requested iff the caller mentioned it at all — including an explicit
+        # `args=None` (JSON `null`), which is then malformed shape (400), NOT the
+        # legacy no-grant path. Only truly omitting the keyword takes the legacy path.
+        grant_requested = args is not _UNSET
+        if ttl_seconds is not None and not grant_requested:
+            raise ServiceError(400, "ttl_seconds requires args")
+        bound_hash = None
+        ttl = DEFAULT_GRANT_TTL_SECONDS
+        if grant_requested:
+            if not isinstance(args, Mapping):
+                raise ServiceError(400, "args must be a JSON object")
+            try:
+                bound_hash = hashing.args_hash(args)
+            except hashing.ArgsNotHashable as exc:
+                raise ServiceError(400, f"args cannot be canonicalized: {exc}")
+            ttl = DEFAULT_GRANT_TTL_SECONDS if ttl_seconds is None else ttl_seconds
+            if isinstance(ttl, bool) or not isinstance(ttl, int) or not (
+                    MIN_GRANT_TTL_SECONDS <= ttl <= MAX_GRANT_TTL_SECONDS):
+                raise ServiceError(
+                    400, f"ttl_seconds must be an integer in "
+                         f"[{MIN_GRANT_TTL_SECONDS}, {MAX_GRANT_TTL_SECONDS}]")
+        # All shape/hash/ttl validation happens BEFORE the broker call, so a malformed
+        # request never leaves a phantom `decision` audit record behind it.
         p = _parse_principal(principal)
-        d = self.broker.authorize(p, source_id, name, dict(context or {}))
-        decision_id = self._audit_log[-1]["decision_id"]
-        return _decision_payload(d, decision_id)
+        with self._authz_lock:  # decision_id read -> grant insert -> grant_issue append
+            d = self.broker.authorize(p, source_id, name, dict(context or {}))
+            decision_id = self._audit_log[-1]["decision_id"]
+            grant_payload = None
+            if grant_requested and d.allowed:
+                issued = datetime.now(timezone.utc)
+                expires = issued + timedelta(seconds=ttl)
+                grant_id = uuid.uuid4().hex
+                self.store.issue_grant(
+                    grant_id=grant_id, decision_id=decision_id, principal_id=p.id,
+                    source_id=source_id, name=name, args_hash=bound_hash,
+                    issued_at=issued.isoformat(), expires_at=expires.isoformat())
+                self.store.append_audit("grant_issue", {
+                    "grant_id": grant_id, "decision_id": decision_id,
+                    "principal_id": p.id, "source_id": source_id, "name": name,
+                    "args_hash": bound_hash, "issued_at": issued.isoformat(),
+                    "expires_at": expires.isoformat(), "ttl_seconds": ttl,
+                })
+                grant_payload = {
+                    "grant_id": grant_id, "args_hash": bound_hash,
+                    "expires_at": expires.isoformat(), "ttl_seconds": ttl,
+                }
+        payload = _decision_payload(d, decision_id)
+        if grant_requested:
+            # Present iff args were sent; explicit null on deny (mixed-fleet detector:
+            # a stale pre-1.1 server never sends this key at all).
+            payload["grant"] = grant_payload
+        return payload
+
+    def redeem_grant(self, grant_id: str, principal: Mapping[str, Any],
+                     args: Mapping[str, Any]) -> dict:
+        """Atomically consume a one-use, argument-bound grant. Always a decision, not
+        an error, for every reachable deny reason — only malformed request shape 400s."""
+        if not grant_id:
+            raise ServiceError(400, "grant_id is required")
+        p = _parse_principal(principal)
+        if not isinstance(args, Mapping):
+            raise ServiceError(400, "args must be a JSON object")
+        try:
+            presented_hash = hashing.args_hash(args)
+        except hashing.ArgsNotHashable as exc:
+            raise ServiceError(400, f"args cannot be canonicalized: {exc}")
+        result = self.store.redeem_grant(
+            grant_id, args_hash=presented_hash, principal_id=p.id,
+            invocable_check=lambda sid, nm: self.catalog.invocable(sid, nm))
+        if result["redeemed"]:
+            self.store.append_audit("grant_redeem", {
+                "grant_id": grant_id, "decision_id": result["decision_id"],
+                "principal_id": p.id, "source_id": result["source_id"],
+                "name": result["name"],
+            })
+        else:
+            if result["reason"] == "not_invocable":
+                self.store.append_audit("grant_close", {
+                    "grant_id": grant_id, "decision_id": result["decision_id"],
+                    "reason": "not_invocable", "already_closed": False,
+                })
+            self.store.append_audit("grant_redeem_denied", {
+                "grant_id": grant_id, "decision_id": result["decision_id"],
+                "principal_id": p.id, "reason": result["reason"],
+            })
+        return {
+            "grant_id": grant_id, "decision_id": result["decision_id"],
+            "redeemed": result["redeemed"], "reason": result["reason"],
+            "source_id": result["source_id"], "name": result["name"],
+            "contract_version": DECISION_CONTRACT_VERSION,
+        }
+
+    def close_grant(self, grant_id: str, reason: str = "explicit_close") -> dict:
+        closed = self.store.close_grant(grant_id)
+        if closed is None:
+            raise ServiceError(404, f"unknown grant {grant_id!r}")
+        self.store.append_audit("grant_close", {
+            "grant_id": grant_id, "decision_id": closed["decision_id"],
+            "reason": str(reason), "already_closed": closed["already_closed"],
+        })
+        return {
+            "grant_id": grant_id, "decision_id": closed["decision_id"],
+            "closed": True, "already_closed": closed["already_closed"],
+            "contract_version": DECISION_CONTRACT_VERSION,
+        }
+
+    def get_grant(self, grant_id: str) -> dict:
+        found = self.store.get_grant(grant_id)
+        if found is None:
+            raise ServiceError(404, f"unknown grant {grant_id!r}")
+        return found
+
+    _GRANT_STATES = frozenset({"issued", "redeemed", "expired", "closed"})
+
+    def list_grants(self, state: str | None = None, limit: int = 100) -> list[dict]:
+        if state is not None and state not in self._GRANT_STATES:
+            raise ServiceError(
+                400, f"unknown grant state {state!r}; one of "
+                     f"{sorted(self._GRANT_STATES)}")
+        return self.store.list_grants(state=state, limit=max(1, min(limit, 1000)))
 
     def record_outcome(self, decision_id: str, outcome: str,
-                       detail: Mapping[str, Any] | None = None) -> dict:
+                       detail: Mapping[str, Any] | None = None,
+                       grant_id: str | None = None) -> dict:
         """Close the loop on an issued decision (contract §3: record())."""
         if not decision_id:
             raise ServiceError(400, "decision_id is required")
@@ -384,7 +531,22 @@ class ToolConnectService:
             "decision_id": decision_id, "decision_seq": found["seq"],
             "outcome": str(outcome), "detail": dict(detail or {}),
         })
-        return {"decision_id": decision_id, "audit_seq": seq}
+        response = {"decision_id": decision_id, "audit_seq": seq}
+        if grant_id is not None:
+            grant = self.store.get_grant(grant_id)
+            if grant is None:
+                raise ServiceError(404, f"unknown grant {grant_id!r}")
+            if grant["decision_id"] != decision_id:
+                raise ServiceError(
+                    400, f"grant {grant_id!r} does not belong to decision "
+                         f"{decision_id!r}")
+            closed = self.store.close_grant(grant_id)
+            self.store.append_audit("grant_close", {
+                "grant_id": grant_id, "decision_id": decision_id,
+                "reason": "outcome_reported", "already_closed": closed["already_closed"],
+            })
+            response["grant_closed"] = True
+        return response
 
     # -- audit --------------------------------------------------------------------------
 
