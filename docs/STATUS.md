@@ -85,8 +85,9 @@ information.
 Stated in full in [PHASE1_VALIDATION.md](PHASE1_VALIDATION.md#remaining-go-no-go-questions). The
 two that were Phase 0 blockers are now closed:
 
-* ~~ToolConnect contradicts the Connect umbrella~~ — **resolved.** Connect `@f0cff5c` lists it as
-  *"Design phase — tool-governance platform, no runtime"* and states the decision-point rule.
+* ~~ToolConnect contradicts the Connect umbrella~~ — **resolved.** Connect's umbrella now records
+  ToolConnect as an **MVP service at `0.1.0`** (a runtime ships), and states the
+  decision-point-not-proxy rule. The earlier *"Design phase — no runtime"* line is superseded.
 * ~~Is flow analysis tractable?~~ — **prototyped.** Yes, with the caveats above.
 
 What remains, decisive first:
