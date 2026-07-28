@@ -16,6 +16,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from . import hashing, mcp_source
+from .buspublish import (
+    BusPublisher,
+    NO_PRINCIPAL_BUS_TIER,
+    bus_outcome_for_execution,
+    bus_tier_for_principal,
+)
 from .catalog import AmbiguousToolName, AssertionStatus  # noqa: F401  (re-export convenience)
 from .descriptor import ClaimedMetadata, TrustedSource, TrustTier
 from .policy import Broker, Decision, PolicyEngine, Principal
@@ -139,12 +145,19 @@ def _tool_payload(svc: "ToolConnectService", source_id: str, name: str) -> dict:
 class ToolConnectService:
     """Everything `toolconnect serve` exposes, callable in-process too."""
 
-    def __init__(self, store: SqliteStore, engine: PolicyEngine) -> None:
+    def __init__(self, store: SqliteStore, engine: PolicyEngine,
+                 bus: BusPublisher | None = None) -> None:
         self.store = store
         self.catalog = store.load_catalog()
         self.engine = engine
         self._audit_log = _PersistentAuditLog(store)
         self.broker = Broker(catalog=self.catalog, engine=engine, audit=self._audit_log)
+        # Best-effort projection onto the shared Connect-ecosystem event bus
+        # (docs/EVENT_BUS.md §9, buspublish.py). Never authoritative: ToolConnect's
+        # own hash-chained `store` audit above is and stays the one AUTHORITY for
+        # every decision, grant, and outcome. Disabled (a no-op) unless the caller
+        # passes one or the environment configures TOOLCONNECT_BUS_URL/_TOKEN.
+        self.bus = bus if bus is not None else BusPublisher.from_env()
         # Held across broker-call -> decision_id read -> grant insert -> grant_issue
         # append, so a concurrent in-process embedder (the HTTP server already
         # serializes via one global handler lock) can never bind a grant to another
@@ -438,6 +451,35 @@ class ToolConnectService:
                     "grant_id": grant_id, "args_hash": bound_hash,
                     "expires_at": expires.isoformat(), "ttl_seconds": ttl,
                 }
+        # Bus projection happens OUTSIDE the lock (never let a slow/dead bus hold
+        # `_authz_lock` and stall every other in-flight authorize() call) and after
+        # ToolConnect's own audit rows already committed — the bus can only ever be
+        # a projection of a decision that already happened, never a gate on it.
+        qualified_name = f"{source_id}:{name}"
+        bus_tier = bus_tier_for_principal(p.effective_tier())
+        # Shared bus contract (EVENT_BUS.md §4.2): `tool.authorized` distinguishes
+        # allow from deny purely by `outcome` — null/absent = allow, "denied" = deny.
+        # "allowed" is NOT a member of the closed outcome vocabulary (§1); an allow
+        # must therefore carry NO outcome key (publish() omits it when passed None).
+        self.bus.publish(
+            "tool.authorized", outcome=None if d.allowed else "denied",
+            actor=p.id, privacy_tier=bus_tier,
+            payload={
+                "principal_id": p.id, "source_id": source_id, "tool": name,
+                "qualified_name": qualified_name, "decision_id": decision_id,
+                "grant_id": None if grant_payload is None else grant_payload["grant_id"],
+                "args_hash": bound_hash, "reason": d.reason,
+                "determining_policies": list(d.determining_policies),
+            })
+        if grant_payload is not None:
+            self.bus.publish(
+                "grant.issued", actor=p.id, privacy_tier=bus_tier,
+                payload={
+                    "principal_id": p.id, "source_id": source_id, "tool": name,
+                    "qualified_name": qualified_name, "decision_id": decision_id,
+                    "grant_id": grant_payload["grant_id"], "args_hash": bound_hash,
+                    "ttl_seconds": grant_payload["ttl_seconds"],
+                })
         payload = _decision_payload(d, decision_id)
         if grant_requested:
             # Present iff args were sent; explicit null on deny (mixed-fleet detector:
@@ -471,6 +513,22 @@ class ToolConnectService:
                 "grant_id": grant_id, "decision_id": result["decision_id"],
                 "principal_id": p.id, "reason": result["reason"],
             })
+        else:
+            # Only a successful redemption gets a bus event (module contract:
+            # "grant redeem success -> grant.redeemed"). A denial is already
+            # covered by `grant_redeem_denied` in ToolConnect's own audit above;
+            # the shared bus reserves no separate wire id for it.
+            source_id = result["source_id"]
+            name = result["name"]
+            self.bus.publish(
+                "grant.redeemed", actor=p.id,
+                privacy_tier=bus_tier_for_principal(p.effective_tier()),
+                payload={
+                    "principal_id": p.id, "grant_id": grant_id,
+                    "decision_id": result["decision_id"], "source_id": source_id,
+                    "tool": name, "qualified_name": f"{source_id}:{name}",
+                    "args_hash": presented_hash,
+                })
         return {
             "grant_id": grant_id, "decision_id": result["decision_id"],
             "redeemed": result["redeemed"], "reason": result["reason"],
@@ -532,6 +590,28 @@ class ToolConnectService:
             # Paired atomically inside close_grant (ADR 0002 §4).
             self.store.close_grant(grant_id, reason="outcome_reported")
             response["grant_closed"] = True
+        # `record_outcome`'s own public signature carries no principal — the caller
+        # is reporting the RESULT of an already-authorized call, not making a new
+        # one — so there is no `Principal.privacy_tier` to translate here (unlike
+        # `authorize`/`redeem_grant`, both of which take one). `found["body"]` is
+        # ToolConnect's own original decision audit record, which DOES carry the
+        # principal id / source_id / tool name that decision was made for, so the
+        # bus event is enriched with those without needing a new plumbing seam.
+        decision_body = found["body"]
+        # ToolConnect's own audit stored the free-form `outcome` verbatim above; the
+        # bus projection must map it onto the closed outcome vocabulary (EVENT_BUS.md
+        # §1), never forward arbitrary caller text into that exact-match filter field.
+        self.bus.publish(
+            "tool.executed", outcome=bus_outcome_for_execution(outcome),
+            actor=str(decision_body.get("principal", "")),
+            privacy_tier=NO_PRINCIPAL_BUS_TIER,
+            payload={
+                "principal_id": decision_body.get("principal"),
+                "source_id": decision_body.get("source"),
+                "tool": decision_body.get("tool"),
+                "qualified_name": decision_body.get("qualified"),
+                "decision_id": decision_id, "grant_id": grant_id,
+            })
         return response
 
     # -- audit --------------------------------------------------------------------------
