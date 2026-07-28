@@ -139,6 +139,9 @@ runtime, or the transports. Each of them is replaceable behind an adapter.
 
 ## Documents
 
+* **[docs/CAPABILITY_PLANE.md](docs/CAPABILITY_PLANE.md)** — the Capability plane's ecosystem
+  responsibilities, and the four distinctions kept separate: policy decision, enforcement,
+  reported outcome, observed outcome.
 * **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the object model, the trust model, the
   interfaces, the reuse verdicts, and the open questions. Start here.
 * **[docs/PHASE1_VALIDATION.md](docs/PHASE1_VALIDATION.md)** — what happened when the three
