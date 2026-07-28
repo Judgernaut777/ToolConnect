@@ -147,6 +147,7 @@ runtime, or the transports. Each of them is replaceable behind an adapter.
   integration seam, offered for AgentConnect's maintainer to reject or amend.
 * **[docs/ROADMAP.md](docs/ROADMAP.md)** — phased plan, and what is deliberately deferred.
 * **[docs/STATUS.md](docs/STATUS.md)** — what is actually true today. Read before trusting a spec.
+* **[docs/ORGANIZATION_AWARE_SETUP.md](docs/ORGANIZATION_AWARE_SETUP.md)** — the Capability plane's part in Connect's organization-aware onboarding: approved/prohibited tools as scoped policy, ownership, and assertion preservation (design direction).
 
 ## The prototype
 
