@@ -590,17 +590,17 @@ Restating, because scope creep in a governance layer is how it becomes an execut
 
 Unresolved, and requiring a decision from the user rather than a guess from the architecture.
 
-1. ~~**This document contradicts the umbrella.**~~ **Resolved 2026-07-10.** Connect (`@f0cff5c`)
-   now records ToolConnect as *"Design phase — tool-governance platform, no runtime"* and states
-   the decision-point-not-proxy rule. The prose is sanctioned.
-2. **Does ToolConnect belong in the family at all?** Connect's `ARCHITECTURE.md` drew
-   AgentConnect → ToolConnect as a dashed arrow labeled *"no contract exists."*
-   [AGENTCONNECT_CONTRACT.md](AGENTCONNECT_CONTRACT.md) now proposes that contract. It has not
-   been agreed by AgentConnect's side.
-3. **Does AgentConnect adopt ToolConnect, or does ToolConnect stand alone?** The fail-closed rule
-   in §6 is a real constraint on AgentConnect's execution path, and it contradicts the optional,
-   fail-open posture of every adapter AgentConnect has defined so far. This needs consent, not
-   assumption.
+1. ~~**This document contradicts the umbrella.**~~ **Resolved.** Connect's umbrella now records
+   ToolConnect as an **MVP service at `0.1.0`** (a runtime ships) and states the
+   decision-point-not-proxy rule. The earlier *"Design phase — no runtime"* framing is superseded.
+2. ~~**Does ToolConnect belong in the family at all?**~~ **Resolved.** The AgentConnect →
+   ToolConnect arrow is no longer dashed: [AGENTCONNECT_CONTRACT.md](AGENTCONNECT_CONTRACT.md) is
+   **adopted**, implemented on AgentConnect's side as the `ToolConnectGovernor` at contract `1.1`.
+3. ~~**Does AgentConnect adopt ToolConnect, or does ToolConnect stand alone?**~~ **Resolved:
+   adopted.** AgentConnect consumes ToolConnect through the fail-closed `ToolConnectGovernor`
+   (contract `1.1`), which binds the exact final arguments of every side-effecting call. The
+   fail-closed posture was accepted deliberately for the tool-authorization chokepoint, distinct
+   from the optional, fail-open memory/compute adapters.
 4. **Who asserts descriptors?** Trust-tier promotion is human-only by design. For a registry of any
    size that is a bottleneck. Is there an attestation path — signed descriptors from a verified
    source — that preserves the property without the toil?
