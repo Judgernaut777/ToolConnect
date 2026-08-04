@@ -37,6 +37,7 @@ from .client import (
 )
 from .flow import FlowFinding, FlowReport, analyze_toolset
 from .mcp_source import DiscoveredTool, DiscoveryResult, McpDiscoveryError, discover
+from .openapi_source import OpenAPISpecError, load_openapi, parse_openapi
 from .policy import Broker, CedarPolicyEngine, Decision, PolicyEngine, Principal
 from .schema import SchemaValidationError, validate_input_schema
 from .service import DECISION_CONTRACT_VERSION, ServiceError, ToolConnectService
@@ -47,9 +48,9 @@ __all__ = [
     "Broker", "Catalog", "CedarPolicyEngine", "ClaimedMetadata", "ClientDecision",
     "DECISION_CONTRACT_VERSION", "DataClass", "Decision", "DiscoveredTool",
     "DiscoveryResult", "DriftReport", "Effect", "FlowFinding", "FlowReport",
-    "McpDiscoveryError", "PolicyEngine", "Principal", "SchemaValidationError",
+    "McpDiscoveryError", "OpenAPISpecError", "PolicyEngine", "Principal", "SchemaValidationError",
     "ServiceError", "SqliteStore", "ToolConnectClient", "ToolConnectDenied",
     "ToolConnectError", "ToolConnectService", "ToolConnectUnavailable", "ToolId",
     "ToolRef", "ToolVersion", "TrustTier", "TrustedSource", "analyze_toolset",
-    "discover", "validate_input_schema",
+    "discover", "load_openapi", "parse_openapi", "validate_input_schema",
 ]
