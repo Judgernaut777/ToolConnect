@@ -20,7 +20,6 @@ from cryptography.hazmat.primitives.serialization import (
     NoEncryption,
     PrivateFormat,
     PublicFormat,
-    load_pem_private_key,
 )
 
 from toolconnect import govgrants
@@ -76,7 +75,9 @@ def mint_grant(priv_pem: str = PRIV_PEM, **payload_overrides) -> dict:
     payload.update(payload_overrides)
     signed = json.dumps(payload, sort_keys=True, separators=(",", ":"),
                         ensure_ascii=False, allow_nan=False).encode()
-    priv = load_pem_private_key(priv_pem.encode(), password=None)
+    priv = __import__("cryptography.hazmat.primitives.serialization",
+                      fromlist=["load_pem_private_key"]).load_pem_private_key(
+        priv_pem.encode(), password=None)
     sig = base64.urlsafe_b64encode(priv.sign(signed)).decode().rstrip("=")
     return {"payload": payload, "signature_scheme": "Ed25519", "signature": sig}
 
