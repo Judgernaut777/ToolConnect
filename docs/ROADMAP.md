@@ -1,69 +1,55 @@
-# Connect Ecosystem — Forward Plan (revised)
+# ToolConnect — Roadmap
 
-**Date**: 2026-07-10
-**Status**: Proposal under active review — replaces the 2026-07-08 draft and the first revision
-**Scope**: AgentConnect, BrainConnect (formerly WikiBrain), ToolConnect, and the empty fourth slot
+Phases, not dates. Each phase names what it proves and what would make it a failure. Nothing
+below is committed; the current phase is the only one that is real.
 
-This revision is a direct response to the validation document of the same date
-(`CONNECT_ECOSYSTEM_VALIDATION_2026-07-10.md`). It corrects three overclaims in the
-original roadmap and re-orders the work accordingly.
+The ordering principle: **the registry and the audit log are load-bearing for everything else, and
+the flow-control analysis is the riskiest idea in the design.** Prove the risky idea early, on
+paper, before building the platform that depends on it.
 
-## What changed from the original proposal
+---
 
-1. **WikiBrain is renamed BrainConnect** and its reframe is stated correctly. It is not
-   "the memory layer with hybrid search" as a differentiator. It is an MCP bridge to a
-   mature knowledge substrate (kine + Graphine) that predates the Connect naming, with
-   trust-tiered memory and federation as its distinguishing properties.
+> **Where we are.** Phase 0 complete. Phase 1 **executed** — see
+> [PHASE1_VALIDATION.md](PHASE1_VALIDATION.md). Cedar validated, flow analysis prototyped and
+> materially revised, differentiation reassessed at 2-of-3-with-one-unproven. Phase 2 is gated on
+> one product question and one technical proof, both listed under Phase 1 below.
 
-2. **ToolConnect is reframed from capability broker to tool governance decision point.**
-   Its original claim — "capability broker with scoped grants and policy" — was already
-   deployed and running in AgentConnect as an MCP adapter with Cedar policies and scoped
-   grants. ToolConnect's existence is now justified only by what that adapter does not
-   do: fail-closed authorization, a tamper-evident audit chain, and enforcement
-   *outside* the tool's own trust domain.
+## Phase 0 — Architecture and interfaces *(complete)*
 
-3. **The Hub is deferred to phase 3+** and will not be built as a monorepo. Premature
-   convergence is the stated failure mode of the original plan.
+**Goal.** Establish scope, boundaries, object model, and the seams to the sibling projects. No
+runtime.
 
-4. **The four-component model is retained** (Knowledge, Orchestration, Capability,
-   Interface) as an organizing frame, not as a build order.
+**Done when:** README, ARCHITECTURE, ROADMAP, STATUS exist and the six open questions in
+[ARCHITECTURE §9](ARCHITECTURE.md#9-open-questions) are stated clearly enough for the user to
+answer them.
 
-## Phase 1 — prove the premise, not the architecture (now)
+**Failure mode:** documents that describe a system nobody has agreed to build, against sibling
+components whose names are guesses. Two of the six open questions are exactly this.
 
-Build only the things whose failure would invalidate the ecosystem thesis. Timebox: 3–4 weeks.
+---
 
-### 1. ToolConnect Core — the tool governance decision point
+## Phase 1 — Validate the assumptions *(executed 2026-07-10)*
 
-The central question ToolConnect must answer: **is there governance value in separating
-the decision from the tool's own trust domain?**
+Full report: **[PHASE1_VALIDATION.md](PHASE1_VALIDATION.md)**. Summary:
 
-Deliverables:
+* ✅ **Cedar via `cedarpy` is suitable.** Prebuilt aarch64 wheel, in-process, no Rust toolchain.
+  Determining policy IDs and `@id` annotations on every decision. 52 tests pass under
+  `unshare -rn` — no network in the decision path. `pycasbin` not needed.
+* ⚠️ **Flow analysis works, and is smaller than claimed.** 3 findings vs 110 pairwise paths on a
+  53-tool catalog. But every finding on a realistic toolset traced to a worst-case label a static
+  descriptor cannot justify, and it is a **grant-time review artifact, not a runtime denial rule.**
+  Descriptors must bind to `(tool, scope)`.
+* ⚠️ **Differentiation: 2 of 3 claims hold; the third is now proven, narrowly.** "Protocol-neutral"
+  passed its Phase-2 gate for OpenAPI 3.x ingest (read-only registry path, local spec files,
+  no execution). It remains unproven for every other protocol.
+* ➕ **Catalog drift found in a real repository.** AgentConnect's spec §17 documents a review loop
+  (`claim_review`, `complete_review`, `get_manager_inbox`) that its MCP adapter does not expose.
+  Detected by comparing two lists; no tool was invoked. AgentConnect was not modified.
 
-* A capability descriptor schema (tool, version, effect, data classes, reversibility)
-  that is protocol-neutral — it describes *what a tool claims to do*, not which
-  protocol it speaks.
-* `ToolSourceAdapter` for MCP (`tools/list` ingest over stdio) and OpenAPI (direct document
-  parse in `openapi_source` — the original `FastMCP.from_openapi` sketch was rejected because
-  an MCP-shaped intermediate would concede the protocol-neutral gate).
-* A `PolicyEngine` interface with a Cedar reference implementation, evaluated
-  **in-process** (cedarpy), not via a sidecar.
-* A tamper-evident audit log (hash-chained, single-writer) recording every allow and
-  every deny with its determining policies.
-* **Explicit non-goals, written down**: not an execution engine, not a proxy, not an
-  MCP gateway, not multi-tenant. There is deliberately no `invoke()` method anywhere
-  in the system.
+**Two gates before Phase 2 begins, in order:**
 
-Exit review (all checks passed — see docs/STATUS.md):
-
-* Deny-by-default holds under adversarial pressure (71-test adversarial suite).
-* The audit chain is tamper-evident and survives restarts.
-* Drift detection catches shadow tools, unasserted discoveries, and rug-pulls.
-* Cross-source shadowing is contained by namespaced identity.
-
-### 2. Two gates before phase 2
-
-1. **AgentConnect adoption decision (external).** AgentConnect chooses `required` or
-   `advisory` integration, or declines, with reasons recorded either way.
+1. **Product question (the user's).** Does a grant-time review artifact justify a separate
+   platform, rather than a feature contributed to IBM ContextForge?
 2. **Technical proof (ours).** Ingest a real OpenAPI document into the same catalog beside the
    MCP tools, without an MCP-shaped intermediate representation. ~~If it needs one,
    "protocol-neutral" has failed and the abandonment rule applies.~~ **Proven** (see
@@ -78,22 +64,121 @@ Exit review (all checks passed — see docs/STATUS.md):
    deliberately does **not** use `FastMCP.from_openapi`, because routing the document through
    an MCP-shaped intermediate would have conceded the gate instead of passing it.
 
-### The condition under which this roadmap should be abandoned
+---
 
-If the two phase-1 claims do not hold, the remaining claims do not matter, and the
-correct move is to stop and write down what was learned.
+## Phase 2 — Registry and descriptor
 
-## Phase 2 — enforcement point and ecosystem integration (only if phase 1 holds)
+The catalog, and the artifact that does not exist in any standard.
 
-* An MCP gateway as the enforcement point for MCP stdio: a proxy in front of one
-  downstream server, authorizing and redeeming a grant per `tools/call`
-  ([adr/0003](adr/0003-mcp-enforcement-gateway.md)). Shipped.
-* Non-MCP enforcement points, informed by what the OpenAPI ingest proof
-  demonstrated about protocol-neutral claims.
-* AgentConnect integration in the mode chosen at the phase-1 gate, with latency
-  measured on a real agent loop.
+* **A Cedar schema** declaring the `Agent` and `Tool` entity types. Phase 1's engine parse-checks
+  policies but cannot type-check them, so `resource.efect` silently evaluates to "attribute absent"
+  and produces an invisible deny. This is the highest-value follow-up in the repository.
+* **Ingest `server.json`** as the declared manifest. Phase 1's drift run produced 11 false
+  "undeclared-present" findings because it diffed against spec *prose*. Prose is not a manifest.
+* `CapabilityDescriptor` as a versioned JSON Schema 2020-12 document, published in-repo, with
+  `reads`/`writes` bound to a `(tool, scope)` pair rather than to a tool.
+* Crosswalk table: MCP annotations → `claimed_*` fields; the `claimed_*` vs `asserted_*` diff as a
+  first-class query.
+* SQLite catalog, reconciler loop, monotonic cursor for `watch()`.
+* Trust tiers and human promotion. Catalog and health as separate records.
+* `ToolSourceAdapter` for MCP (`tools/list` ingest over stdio) and OpenAPI (direct document
+  parse in `openapi_source` — the original `FastMCP.from_openapi` sketch was rejected because
+  an MCP-shaped intermediate would concede the protocol-neutral gate).
+* The `x-toolconnect-*` extension convention, applied to third-party specs via OpenAPI Overlay
+  1.1.0 rather than by forking them.
 
-## Phase 3+ — deferred
+**Proves:** that capability metadata can be asserted independently of what a server claims, and
+that drift between the two is detectable across a version bump — the rug-pull detector.
 
-* Hub, Interface layer, monorepo convergence: deferred until the components have
-  proven independent value. Premature convergence is the failure mode to avoid.
+**Deliberately not in this phase:** policy, health probing, invocation.
+
+---
+
+## Phase 3 — Policy and decision
+
+* Cedar schema for `Principal × Action × ToolVersion × Context`, evaluated in-process via
+  `cedarpy`. Pinned; re-verified against upstream Cedar.
+* Structured decision explanations — determining policy IDs, failed gates, rejected alternatives —
+  in the same genre as AgentConnect's persisted route explanation.
+* Argument validation against the **canonical** schema before any grant is issued, with the
+  per-provider downcompilation diff recorded as tool metadata (the two-schema hazard).
+* Delegation chains: `on_behalf_of` attenuating, depth-bounded, intersecting.
+* `list_tools()` as a filtered catalog — discovery as an authorization decision.
+
+**Proves:** that a denial can always be explained, and that a grant names an exact
+`(principal, tool@version, argument_digest)` triple.
+
+**Gate:** policy tests run offline with no network in the decision path. If that is not true, the
+engine choice was wrong.
+
+---
+
+## Phase 4 — Health
+
+* The four-state machine (`unknown` / `healthy` / `degraded` / `unhealthy`), with `unhealthy →
+  degraded → healthy` recovery that cannot short-circuit.
+* Active probes (MCP `ping` for liveness, periodic `tools/list` for connected-but-broken and for
+  descriptor drift) plus passive observation fed from `broker.record()`.
+* Per-tool circuit breaking via `pybreaker`, never per-source.
+
+**Blocked on:** the MCP `2026-07-28` release candidate, which reportedly makes the core protocol
+stateless. Do not build session-assuming probes before that lands and is read.
+
+---
+
+## Phase 5 — Brokerage and audit
+
+* `authorize()` / `record()`. Rate limits, budgets, and quotas as policy inputs.
+* Unclosed grants surfaced as audit findings.
+* The audit composite: CloudEvents 1.0.2 envelope, OPA-shaped decision body, OCSF `api_activity`
+  field naming, OTel `gen_ai.*` / `mcp.*` attributes pinned to a commit.
+* Hash-chained records over SQLite, with a pluggable external anchor.
+* Chain verification (`verify()`) as a first-class operation, not a script.
+
+**Proves:** the fourth first principle. An audit log containing only successes is not an audit log —
+so the acceptance test is a *denial* that round-trips through the chain and verifies.
+
+---
+
+## Phase 6 — Adapters outward
+
+Only after the core is real.
+
+* MCP server adapter, so an agent can reach ToolConnect the same way it reaches any tool. This is
+  the one place ToolConnect speaks MCP as a *server*, and it must not become the only interface —
+  the same rule AgentConnect enforces.
+* HTTP and CLI adapters over the identical service object. No logic duplicated per protocol.
+* A PDP-backed policy plugin for ContextForge or agentgateway, for deployments that genuinely need
+  an in-path proxy.
+
+---
+
+## Explicitly deferred
+
+Not "later" as a euphemism for "never" — these are real, and out of scope until the core exists.
+
+| Deferred | Until |
+|---|---|
+| Biscuit-encoded grants | Callers are cross-process. In-process grants are objects. |
+| Apicurio or any external descriptor registry | Local-first stops being enough. |
+| Merkle trees, Rekor, Tessera anchoring | There is an untrusted verifier or a second writer. |
+| Partial evaluation for candidate filtering | The catalog is large enough that filtering is slow. Cedar's is experimental. |
+| Arazzo multi-step workflow governance | Single-invocation governance works. Workflows are AgentConnect's. |
+| A2A, cross-instance federation | There is a second instance. |
+| Attestation path for descriptors | Human promotion is demonstrably the bottleneck (open question 4). |
+
+## Non-goals, restated
+
+No tool execution. No MCP replacement. No task state, memory, workflows, model routing, or secrets
+storage. No general API gateway. These do not become goals in a later phase.
+
+## The condition under which this roadmap should be abandoned
+
+From [ARCHITECTURE §7](ARCHITECTURE.md#why-not-just-use-contextforge-or-agentgateway): ToolConnect
+justifies its existence on three claims — that it is an in-process library rather than a proxy,
+that it is protocol-neutral rather than MCP-shaped, and that it governs toolsets rather than
+calls. **If two of the three fail, adopt IBM ContextForge or agentgateway and contribute the
+remaining idea upstream.**
+
+Check this at the end of Phase 1, when the flow-control prototype either works or does not. It is
+much cheaper to abandon a design than a platform.
