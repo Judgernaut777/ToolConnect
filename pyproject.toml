@@ -9,6 +9,10 @@ dependencies = [
     # Policy decision point. Apache-2.0, in-process, prebuilt aarch64 wheels.
     # Community-maintained binding to AWS Cedar — pinned deliberately.
     "cedarpy>=4.8.6,<5",
+    # Offline Ed25519 verification of Connect-Governance execution grants (R5).
+    # Used only by toolconnect.govgrants — the vendored, clock-free verifier
+    # that redeems governance grants at the point of effect.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
