@@ -1,211 +1,224 @@
-# toolconnect serve — operator reference
+# ToolConnect service — persistence, HTTP surface, MCP ingest
 
-`toolconnect serve` runs the ToolConnect decision point as a small HTTP service.
-This document is the contract: routes, wire shapes, configuration, and the security
-model. It is aimed at two readers — the operator running the service, and the
-AgentConnect integrator deciding whether to call it (see
-[AGENTCONNECT_CONTRACT.md](AGENTCONNECT_CONTRACT.md) for the latter's checklist).
+**Status:** implemented in 0.1.0. This documents what `toolconnect serve` actually
+exposes. Where [AGENTCONNECT_CONTRACT.md](AGENTCONNECT_CONTRACT.md) pins a shape (the
+Decision explanation, the outcome-recording loop closure, fail-closed unavailability),
+the JSON mirrors it; everything else here is deliberately minimal and may change before
+the contract is agreed by AgentConnect's side.
 
-## Configuration
+There is **no invocation route**. `/authorize` answers "may this principal call this
+tool"; the caller performs the call itself and closes the loop via
+`/decisions/{id}/outcome`. This is ARCHITECTURE rule 2 made concrete.
 
-Precedence: explicit flags > `--config FILE` (TOML) > defaults.
+## Running it
 
-| Key / flag | Default | Meaning |
-|---|---|---|
-| `db` / `--db` | — (required) | SQLite database path |
-| `policies` / `--policies` | — (required for `serve`) | Cedar policy file |
-| `host` / `--host` | `127.0.0.1` | bind host |
-| `port` / `--port` | `8095` | bind port (8080/8090/8787 are taken on the reference host) |
-| `token` (config) or `$TOOLCONNECT_AUTH_TOKEN` | unset | bearer token; required for a non-loopback bind |
-| `token_env` / `--token-env` | `TOOLCONNECT_AUTH_TOKEN` | name of the env var holding the token |
-| `rate_limit_per_min` / `--rate-limit` | `0` (off) | requests per rolling 60 s per client IP |
+```
+toolconnect init-db --db ./toolconnect.db
+toolconnect serve --db ./toolconnect.db --policies examples/policies.cedar
+# → http://127.0.0.1:8095
+```
 
-A worked example lives in `examples/toolconnect.toml` and `examples/policies.cedar`.
+Default bind is `127.0.0.1:8095` (loopback only; 8080, 8090, and 8787 are taken on the
+reference host). `--config examples/toolconnect.toml` supplies the same settings from
+TOML; explicit flags win. `serve` refuses to start without a policy file, and refuses an
+unparseable one — a policy set that does not parse must never become an allow-all server.
+An *empty* policy set is valid and denies everything (Cedar default-deny).
 
-`serve` refuses to start without an explicit, parseable policy file. A decision point
-with no policies would default-deny everything — safe, but almost certainly a
-misconfiguration, so the operator must say what they meant.
+## Architecture of the layer
 
-## Operator CLI
+```
+SqliteStore  ──hydrates──►  Catalog / Broker / CedarPolicyEngine  (the verified core)
+     ▲                            │
+     └──────── write-through ─────┘
+                    ToolConnectService (service.py)
+                            │
+                    stdlib HTTP front (server.py)
+```
 
-| Command | Behavior |
-|---|---|
-| `toolconnect init-db --db X` | create/open the database; print schema version + audit-chain status |
-| `toolconnect serve --db X --policies P` | run the HTTP service |
-| `toolconnect gateway --db X --policies P --principal-id A --source-id S -- CMD...` | run the MCP enforcement gateway in front of one downstream MCP server |
-| `toolconnect drift --db X --source S` | report drift against the last discovery; exit `2` when drift exists |
-| `toolconnect backup --db X --out Y` | consistent snapshot (schema + catalog + chain); verifies the copy |
-| `toolconnect audit --db X [--kind K] [--limit N]` | recent audit records, newest first |
-| `toolconnect ingest-openapi --db X --source SID --spec F [--tier T]` | ingest a local OpenAPI 3.x spec (JSON/YAML) as claimed capabilities; exit non-zero on a spec fault, nothing partially ingested |
-| `toolconnect verify-audit --db X` | walk the hash chain; exit `1` if broken (tamper/loss detection) |
-| `toolconnect version` | print version |
+The in-memory decision core is the semantic authority. The store never answers a
+governance question; it persists what the core decided and reconstructs the core's
+exact state at startup. Assertion fingerprints are stable SHA-256 digests (see
+*Amendments* below), so the rug-pull detector works across restarts.
 
-## Security model
-
-* **Fail closed, always.** Every authorization path that does not produce an explicit
-  permit produces a denial — unknown tool, unasserted tool, engine error, malformed
-  request. A denial is a decision, not an error, and is recorded identically.
-* **Loopback by default.** The default bind is `127.0.0.1`. Binding any other host
-  without a bearer token is refused at startup and again at server construction — an
-  open decision point on a reachable interface is not a configuration this code will
-  run.
-* **Authentication.** When a token is configured, *every* route (including `/health`)
-  requires `Authorization: Bearer <token>`; comparison is constant-time. When no token
-  is configured (the loopback default), the surface is open to local processes — by
-  design, and the reason non-loopback requires a token.
-* **Availability.** The request body is capped at 1 MiB; per-IP rate limiting is
-  available for non-local deployments. The listen backlog is 128 (the stdlib default
-  of 5 overflows under connection bursts).
-* **No invocation.** There is no route that executes a tool. `/authorize` answers a
-  question; the caller performs the call and closes the loop via
-  `/decisions/{id}/outcome`.
-
-## Non-local deployment
-
-1. Set a bearer token via `$TOOLCONNECT_AUTH_TOKEN` (or `token` in the config file).
-2. Consider `--rate-limit` (e.g. `600`) so a hostile or broken client cannot exhaust
-   the decision point.
-3. Terminate TLS in front of it (a reverse proxy); `toolconnect serve` speaks plain
-   HTTP and does not intend to grow a TLS stack.
+The audit log is append-only and hash-chained
+(`record_hash = SHA-256(kind ‖ body ‖ created_at ‖ prev_hash)`); `GET /audit/verify`
+walks the chain. Decisions, denials, ingest failures, assertions, and outcomes are all
+records on the same chain — an audit log that only contains successes is not an audit
+log.
 
 ## Routes
 
-### Read surface
+Source ids follow the MCP registry's reverse-DNS convention and may contain `/`
+(`io.github.owner/server`); parametrized routes capture them greedily. Tool names are
+the trailing path segment and must not contain `/`. All bodies and responses are JSON.
+Errors are `{"error": {"status": N, "message": "..."}}`.
 
-| Method | Path | Returns |
-|---|---|---|
-| GET | `/health` | service status, version, contract version, audit-chain status |
-| GET | `/sources` | registered sources, tiers, declared tool names |
-| GET | `/catalog` | every tool with claimed + asserted metadata |
-| GET | `/catalog/{source_id}/{name}` | one tool (404 if unknown) |
-| GET | `/assertions/{source_id}/{name}` | assertion status (`never_asserted` / `asserted` / `asserted_then_changed`) + evidence |
-| GET | `/drift/{source_id}` | drift vs last discovery (409 if never observed — unknown, not clean) |
-| GET | `/audit?kind=K&limit=N` | audit records, newest first |
-| GET | `/audit/verify` | hash-chain verification result |
-| GET | `/grants?state=S&limit=N` | grant rows (state = `issued`/`redeemed`/`expired`/`closed`) |
-| GET | `/grants/{grant_id}` | one grant (404 if unknown) |
+| Route | Purpose |
+|---|---|
+| `GET /health` | status, version, source/tool counts, audit-chain state |
+| `POST /sources` | register a source: `{source_id, tier, transport?, declares?, command?}`; `tier` is one of `verified` \| `known` \| `untrusted` \| `quarantined` (anything else is a `400`; only `verified`/`known` tools can ever become invocable) |
+| `GET /sources` | list sources with their declared and ingested tools |
+| `POST /sources/{source_id}/ingest` | run real MCP stdio discovery against the source's configured `command`; body `{timeout?}` (capped at 60 s) |
+| `POST /sources/{source_id}/tools` | push-style ingest for non-stdio sources: `{tools: [{name, version?, claimed?, input_schema?}]}` |
+| `GET /catalog` | every tool with claimed/asserted metadata, assertion status, invocability, claim conflicts |
+| `GET /catalog/{source_id}/{name}` | one tool |
+| `POST /assertions` | operator vouches: `{source_id, name, descriptor}`; `descriptor.asserted_by` is required — promotion is human-only |
+| `GET /assertions/{source_id}/{name}` | assertion status, fingerprint evidence, invocability |
+| `GET /drift/{source_id}` | drift against the **last successful discovery**; `409` if no discovery was ever observed — an unobserved source has unknown drift, not none |
+| `POST /authorize` | `{principal, source_id, name, context?, args?, ttl_seconds?}` → a Decision. `args` binds an argument-bound one-use grant on allow (contract 1.1); omitted, behavior is byte-identical to contract 1.0 |
+| `POST /grants/{grant_id}/redeem` | atomically consume a one-use grant immediately before executing the call: `{principal, args}` → always `200` with a decision outcome (`redeemed: true/false` + `reason`); `400` only on malformed shape |
+| `POST /grants/{grant_id}/close` | explicitly close a grant (e.g. abandon in a `finally`); idempotent; unknown id is `404` |
+| `GET /grants/{grant_id}` | one grant's stored fields plus its **computed** status (`issued`\|`redeemed`\|`expired`\|`closed`) |
+| `GET /grants?state=&limit=` | grants filtered by computed status, newest-issued-first — how an operator finds a dangling (never redeemed or closed) grant |
+| `POST /decisions/{decision_id}/outcome` | close the loop: `{outcome, detail?, grant_id?}`; `detail`, when present, must be a JSON object (`400` otherwise); unknown ids are `404`; `grant_id`, when given, closes that grant in the same call and adds `"grant_closed": true` to the response |
+| `GET /audit?kind=&limit=` | newest-first audit records (kinds: `decision`, `outcome`, `ingest`, `assertion`, `drift`, `source`, `grant_issue`, `grant_redeem`, `grant_redeem_denied`, `grant_close`) |
+| `GET /audit/verify` | walk the hash chain; reports the first broken record |
 
-Source ids follow the MCP registry's reverse-DNS convention and may contain slashes
-(`io.github.owner/server`); routes capture them greedily.
-
-### Write surface
-
-| Method | Path | Body | Returns |
-|---|---|---|---|
-| POST | `/sources` | `{source_id, tier, transport?, declares?, command?}` | the registered source |
-| POST | `/sources/{source_id}/ingest` | `{timeout?}` | real MCP stdio discovery against the source's configured `command` (502 + typed `fault_kind` on failure; nothing partial is ingested) |
-| POST | `/sources/{source_id}/tools` | `{tools: [...]}` | push-style ingest for non-stdio sources (claims supplied by the caller) |
-| POST | `/assertions` | `{source_id, name, descriptor}` | operator assertion (422 if the tool's declared `input_schema` is incoherent — see *Grant-time schema validation*) |
-| POST | `/authorize` | `{principal, source_id, name, context?, args?, ttl_seconds?}` | a Decision (see below); with `args`, also a one-use grant on allow (contract 1.1, below) |
-| POST | `/grants/{grant_id}/redeem` | `{principal, args}` | atomic one-use redemption; every deny is a decision, not an error |
-| POST | `/grants/{grant_id}/close` | `{reason?}` | idempotent close |
-| POST | `/decisions/{decision_id}/outcome` | `{outcome, detail?, grant_id?}` | closes the loop on a decision (contract §3 `record()`); `grant_id` closes the grant in the same call |
-
-### The Decision shape (contract v1.1)
+### The Decision shape
 
 ```json
 {
-  "decision_id": "…",
-  "allowed": true,
-  "reason": "permitted by allow-reads",
-  "determining_policies": ["allow-reads"],
+  "decision_id": "0f3a…",
+  "allowed": false,
+  "reason": "forbidden by no-sensitive-reads-for-rented",
+  "determining_policies": ["no-sensitive-reads-for-rented"],
   "default_deny": false,
   "errors": [],
   "contract_version": "1.1"
 }
 ```
 
-The key set is pinned by golden fixtures in `tests/test_contract.py`. Additive fields
-keep the major version; a removed/renamed field bumps it. Clients compare the MAJOR
-component and fail closed on a mismatch (`ToolConnectClient.EXPECTED_CONTRACT_MAJOR`).
-
-`default_deny: true` means *no policy matched at all* — materially different from an
-explicit `forbid` (which names its determining policies). A policy bug and a policy
-decision are never conflated.
-
-### Argument-bound one-use grants (contract 1.1)
-
-When `/authorize` is called with `args` (the exact final arguments of the intended
-call), an allow additionally returns:
+When the caller sends `args`, an allow additionally carries a `grant`:
 
 ```json
 {
+  "...": "as above, contract_version \"1.1\"",
   "grant": {
-    "grant_id": "…",
-    "args_hash": "<sha256 of canonical-args>",
-    "expires_at": "<iso8601>",
+    "grant_id": "9c2e…",
+    "args_hash": "sha256 hex of the canonical args",
+    "expires_at": "2026-…Z",
     "ttl_seconds": 60
   }
 }
 ```
 
-The grant binds *(principal, source_id, name, args)* and must be **redeemed**
-atomically — once, by the same principal, with arguments hashing to the same
-`args_hash`, before expiry — immediately before the call executes:
+`grant` is present **iff** the request sent `args` — never omitted, `null` on a deny —
+which doubles as the mixed-fleet detector: a pre-1.1 server never sends the key at all,
+so a caller that asked for a grant and got no `grant` key back knows to refuse rather than
+execute ungoverned (see *Argument-bound one-use grants* below).
 
-```
-POST /grants/{grant_id}/redeem  {"principal": {"id": "…"}, "args": {…}}
-```
+`determining_policies` is empty on a **default deny** — no policy matched — and
+`default_deny` is true, which the contract requires to stay distinguishable from an
+explicit `forbid`. A denial is returned as HTTP `200`: it is a decision, not an error.
+Requests that cannot be evaluated at all (unknown tool, unregistered source) are also
+decisions — recorded, denied, explained.
 
-Redeem resubmits the raw `args`; the server is the only hasher, so no client ever
-needs to reproduce the canonicalization rule. Every reachable deny (`not_found`,
-`already_redeemed`, `closed`, `expired`, `principal_mismatch`, `args_mismatch`,
-`not_invocable`) returns `{"redeemed": false, "reason": …}` with a 200 — redemption
-is a decision, not an error. `not_invocable` (the tool lost its assertion or its
-source's tier dropped between authorize and redeem) also permanently closes the
-grant. `ttl_seconds` is optional, 1–300, default 60; out-of-range values are refused
-(400), never silently clamped.
+`contract_version` is the versioned shape of the Decision itself. The **major** component
+is a compatibility signal: an additive field keeps the major, a removed/renamed field or
+a changed meaning bumps it. A client that does not recognize the major must **fail closed**
+(treat it as unavailable), never guess. `toolconnect.client.ToolConnectClient` does exactly
+this. The exact key set is pinned by a golden fixture (`tests/test_contract.py`), so the
+shape cannot drift silently.
 
-#### The canonical-args rule (the ONLY rule; server-side)
+`principal` is `{id, privacy_tier?, kind?, on_behalf_of?}` and `on_behalf_of` nests
+recursively; authority is the intersection of the delegation chain
+(`Principal.effective_tier()`), so delegation cannot launder privilege.
 
-`sort_keys=True` (recursive), `separators=(",", ":")`, `ensure_ascii=True`,
-`allow_nan=False`; arrays keep caller order; **no Unicode normalization** (NFC and
-NFD forms hash differently, by design); `int` and `float` never conflate (`1 ≠ 1.0`);
-non-string object keys, non-finite floats, and unsupported types are rejected (400).
-Implemented once, in `toolconnect.hashing`; pinned by `tests/test_hashing.py`.
+### Argument-bound one-use grants (contract 1.1)
 
-#### Mixed-fleet rule
+Authorization moves from worker-dispatch time to the **final invocation boundary**.
+`POST /authorize` may bind the exact final arguments the caller is about to execute
+(`args`), and — on allow — issue a one-use `grant`. Immediately before executing, the
+caller redeems that grant with the **same raw args** via `POST /grants/{id}/redeem`;
+only a successful redeem may proceed to execution. This is additive: an `/authorize`
+call with no `args` behaves exactly as contract 1.0 did.
 
-An allow with `"grant": null` (deny, or args not sent) is distinguishable from a
-stale pre-1.1 server, which never sends the key at all. A caller that sent `args` and
-got an allow with **no grant** must treat it as unusable — `ToolConnectClient.governed_invoke`
-raises `ToolConnectUnavailable` rather than executing ungoverned.
+**Canonicalization (the args-hash rule).** ToolConnect is the *only* hasher — a client
+never computes or transmits a hash, it resubmits raw `args` at redeem time and the
+server re-derives the hash to compare. The rule (`toolconnect.hashing`):
+`json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+allow_nan=False)`, SHA-256 over the UTF-8 bytes. Consequences worth naming: object keys
+sort in code-point order at every nesting level; array order is significant; no Unicode
+normalization is applied (NFC and NFD forms of the same visible string hash
+differently — a documented non-goal, not a bug); `1` and `1.0` never conflate, nor do
+`5` and `"5"`; non-finite floats (`NaN`/`Infinity`) and non-string object keys are
+rejected with `400` before any audit record is written.
 
-## Audit log
+**Grant status is always computed, never a stored authority** — `issued` /
+`redeemed` / `expired` / `closed`, derived from three timestamp latches
+(`redeemed_at`, `closed_at`, `expires_at`) exactly the way `load_catalog` re-derives
+assertion validity rather than trusting a persisted flag. Grant rows are **never
+deleted**, so a dangling (issued, never redeemed or closed) grant stays queryable via
+`GET /grants?state=issued` — that is deliberately how an operator finds a tool call
+that was authorized but never actually happened (or happened without being reported).
+**No raw call arguments are ever persisted or audited** — only the hash.
 
-Append-only, hash-chained: `record_hash = SHA-256(kind ␟ body ␟ created_at ␟ prev_hash)`.
-Kinds: `source`, `ingest`, `drift`, `assertion`, `decision`, `outcome`, `grant_issue`,
-`grant_redeem`, `grant_redeem_denied`, `grant_close`. A durable high-water mark in
-`meta` makes tail truncation (deleting the newest records) detectable — a truncated
-chain still validates internally, so the tip is compared against the recorded head.
-`toolconnect verify-audit` exits `1` on any break.
+**Redeem is atomic and every branch is an explicit deny** (`reason` on a non-redeem):
+`not_found`, `already_redeemed` (replay), `closed` (see below), `expired`
+(inclusive — `now >= expires_at` denies), `principal_mismatch` (a grant is bound to the
+principal that requested it, not a bearer capability — a leaked `grant_id` in a log line
+is not redeemable by someone else), `args_mismatch`, `not_invocable` (the catalog
+dropped the tool's assertion between issue and redeem — a rug-pull or drift — checked
+**inside** the same transaction that would otherwise redeem, and the grant is
+permanently closed in that same transaction rather than left redeemable later). A grant
+that has been closed (explicitly, via outcome, or by a failed `not_invocable` check)
+**cannot** subsequently redeem even if none of the other conditions would have denied
+it — close always wins.
 
-Grant mutations and their audit records commit as ONE SQLite transaction (ADR 0002
-§4): a grant can never exist, be redeemed, or be closed with no matching audit trace.
+**TTL**: `ttl_seconds` is only meaningful alongside `args` (a `400` otherwise); bounds
+are `[1, 300]`, default `60`; out-of-range or non-integer (a JSON `bool` is rejected —
+`bool` is an `int` subclass in Python and would otherwise silently pass) is a `400`,
+never silently clamped.
 
-## Grant-time schema validation (deliverable 11)
+**TOCTOU, honestly stated:** ToolConnect is a PDP, not a proxy — nothing here can stop
+a caller from mutating its own arguments after a successful redeem and before it
+actually executes the call. The client SDK's `governed_invoke` helper (below) closes
+this as tightly as a non-proxying design can: it deep-copies `args` once at entry and
+uses that frozen snapshot for authorize, redeem, **and** the executor call, so the
+three can never see different arguments. Skipping redeem altogether is *detectable*
+(the grant sits dangling, auditable) but not *preventable* — the enforcement point has
+to actually call redeem for the enforcement to exist. See `docs/adr/0002-argument-bound-grants.md`.
 
-ToolConnect validates the *shape* of a tool's declared `input_schema` when an operator
-asserts it; the **caller** validates *arguments* against that schema at invocation
-time, because ToolConnect is never in the data path and never sees arguments (except
-hashes). An assertion over a structurally incoherent schema (a non-object schema,
-`properties` that is not an object, `required` names absent from `properties`, an
-unknown top-level `type`) is refused with 422. It is deliberately not a full JSON
-Schema meta-validator: an empty `{}` schema is valid and means "no declared
-constraints".
+**Governed invocation (client SDK).** `toolconnect.client.ToolConnectClient.governed_invoke(
+principal, source_id, name, args, executor, *, context=None, ttl_seconds=None)` performs
+authorize(final args) → redeem → `executor(frozen_args)` → outcome, fail-closed at every
+step before execution: an authorize-deny raises `ToolConnectDenied`; a stale pre-1.1
+server (allow, no `grant` key) or a redeem-deny raises `ToolConnectUnavailable` /
+`GrantRedeemDenied` and `executor` is never called. If `executor` raises, the original
+exception propagates after best-effort cleanup (close the grant, record an `"error"`
+outcome — failures there never mask the real exception). After a successful execution,
+outcome reporting is best-effort: an audit-path outage never destroys a result that
+already ran; the grant is left visibly "redeemed but never closed" instead, which is
+truthful and auditable.
+
+### Failure semantics (fail closed, everywhere)
+
+* MCP discovery faults — `timeout`, `malformed_json`, `truncated_response`,
+  `spawn_failed`, `protocol_error`, `duplicate_tool` — discard the **whole** discovery
+  (a partial page ingests nothing), mutate no catalog state, return `502`, and append an
+  auditable `ingest` record carrying the fault kind.
+* A tool discovered but never asserted is not invocable, and `/authorize` says why.
+* A vouched tool whose claim changed (`redefined_after_assertion`) loses invocability
+  until a human re-asserts; re-announcing the identical claim is a no-op.
+* An engine error is a denial. A missing decision is never an allow.
 
 ## MCP source adapter
 
-`toolconnect.mcp_source.discover(command, timeout)` speaks real MCP over stdio to a
-server subprocess: `initialize` handshake, `notifications/initialized`, paginated
-`tools/list` (following `nextCursor`). Annotations (`readOnlyHint` etc.) normalize into
-`ClaimedMetadata` — recorded, diffed, never consulted for policy. There is deliberately
-no `tools/call`: the adapter ingests and probes, it never invokes.
+`toolconnect.mcp_source.discover(command, timeout)` speaks actual MCP over a child
+process's stdio: `initialize` (protocol `2025-06-18`) → `notifications/initialized` →
+paginated `tools/list`. Server annotations (`readOnlyHint`, `destructiveHint`,
+`idempotentHint`, `openWorldHint`) are normalized into `ClaimedMetadata` — recorded,
+diffed, never consulted for policy. There is no `tools/call` in the adapter, by design.
 
-Every transport fault fails closed as a typed `McpDiscoveryError.kind`
-(`spawn_failed`, `timeout`, `malformed_json`, `truncated_response`, `protocol_error`,
-`duplicate_tool`), mutates nothing, and leaves a hash-chained `ingest` audit record
-with `ok: false`. A partial discovery (page 1 fine, page 2 errors) is discarded whole.
+`fixtures/mini_mcp_server.py` and `fixtures/db_mcp_server.py` are **two** independent
+real stdlib MCP servers used by the test suite, with different tool sets and server
+identities and the same fault modes (`--mode malformed|truncate|hang|dup|partial|
+slowinit|empty`) so transport faults are produced on a real wire rather than by
+monkeypatching. They overlap on one bare name (`fetch_url`) on purpose: it forces a
+cross-source collision, proving namespaced `(source_id, name)` identity keeps the two
+distinct and that bare-name resolution fails closed on the ambiguity. Discovery,
+normalization, and all six fault classes are exercised against both
+(`tests/test_multi_server.py`, `demo_multi_server.py`).
 
 ## OpenAPI source adapter (protocol-neutral proof)
 
@@ -231,26 +244,136 @@ ingest a partial document. Covered by `tests/test_openapi_source.py` against
 
 ## MCP enforcement gateway
 
-`toolconnect gateway --db D --policies P --principal-id A --source-id S -- <downstream
-command>` is the PEP: an MCP stdio proxy in front of ONE downstream MCP server
-([adr/0003](adr/0003-mcp-enforcement-gateway.md)). For every `tools/call`:
-
 ```
-extract final args -> authorize(args=...) -> redeem the grant -> forward -> record outcome
+toolconnect gateway --db X --policies Y --principal-id P --source-id SID -- <downstream command...>
 ```
 
-* `tools/list` is answered from the downstream's own listing, filtered to what the
-  gateway's catalog currently has asserted + invocable — an unasserted tool is
-  invisible, never merely uncallable.
-* `initialize` / `ping` / `notifications/initialized` pass through verbatim. Every
-  other request method is refused (`NOT_PERMITTED`, -32004); every other notification
-  is dropped; batched requests are refused whole; downstream-initiated requests (e.g.
-  `sampling/createMessage`) are refused toward the downstream so it never deadlocks.
-* The one argument mapping extracted from the request is the same object authorized,
-  redeemed, and forwarded — no second read, so tampering between authorize and
-  forward is impossible by construction.
-* Fail-closed resource bounds: frames over 8 MiB refused, `tools/list` capped at 100
-  pages / 10 000 tools with repeated-cursor detection.
-* Decision refusals use ToolConnect-specific JSON-RPC codes: `DENIED` -32001,
-  `REDEEM_DENIED` -32002, `DOWNSTREAM_UNAVAILABLE` -32003, `NOT_PERMITTED` -32004.
-  A well-formed downstream error is relayed verbatim.
+An optional stdio proxy in front of **one** downstream MCP server command. It speaks MCP
+to whatever spawned it and, for every `tools/call`, runs
+`authorize(args=...) -> redeem_grant -> forward -> record_outcome` before the downstream
+server ever sees the call — a deny, a redeem denial, or a malformed request refuses
+without forwarding. `tools/list` is answered from the downstream server's own listing,
+filtered to tools this gateway's catalog currently has asserted and invocable.
+`initialize`/`ping`/`notifications/initialized` pass through verbatim (provably
+side-effect-free protocol plumbing); every other MCP method is refused rather than
+forwarded. Uses `ToolConnectService` in-process — same object `serve` wraps, no second
+decision core, no HTTP hop. Full design and the "still not an `invoke()`" reasoning:
+[docs/adr/0003-mcp-enforcement-gateway.md](adr/0003-mcp-enforcement-gateway.md). Tested
+end-to-end against a real `tools/call`-capable fixture server in `tests/test_gateway.py`.
+
+## Amendments over the Phase 1 prototype
+
+1. **Stable claim fingerprints.** `Catalog._fingerprint` previously used the builtin
+   `hash()`, which is salted per process — correct in memory, meaningless on disk. It
+   now uses SHA-256 over a canonical encoding. Semantics are unchanged (fingerprints are
+   equal iff the `(version, claim)` tuples are equal) and the change is proven
+   cross-process in `tests/test_store.py::TestFingerprintStability`.
+2. **`input_schema` is carried through ingest** onto the persisted `ToolVersion`, and is
+   **validated for structural coherence at grant (assertion) time** (see *Schema
+   validation boundary* below). Argument-vs-schema validation at call time remains the
+   caller's responsibility — ToolConnect is never in the data path.
+3. **`decision_id` and outcome recording.** Every Broker audit record gains a
+   `decision_id` so the contract's `record()` loop closure has something to reference.
+   The Broker itself is unmodified; the id is attached by the persistence layer.
+
+## Non-local deployment (auth, rate limiting, TLS)
+
+The default bind is loopback with an open surface — correct for a co-located decision
+point, unsafe anywhere else. For a reachable deployment:
+
+* **Bearer-token auth.** Set a token via `$TOOLCONNECT_AUTH_TOKEN` (or `token` in the
+  config, or name a different env var with `--token-env NAME`). When a token is set,
+  **every** route requires `Authorization: Bearer <token>` (constant-time compared);
+  a missing/wrong token is `401` with `WWW-Authenticate: Bearer`. The token is never a
+  bare flag — argv is visible in `ps`. `serve` **refuses to bind a non-loopback host
+  with no token**: bind `127.0.0.1`, or set a token. `/health` is *not* exempt — the
+  catalog and audit state are sensitive; probe liveness over loopback or via the proxy.
+* **Rate limiting.** `--rate-limit N` (or `rate_limit_per_min` in config) caps requests
+  per rolling 60 s window per client IP; over the cap is `429` with `Retry-After`. `0`
+  (default) disables it. It is a backstop — do primary rate limiting at the proxy.
+* **TLS is terminated by a reverse proxy** (nginx/Caddy/a cloud LB), never in-process.
+  Put ToolConnect on loopback (or a private interface) behind the proxy, which
+  terminates TLS and forwards to it. The stdlib server does not and will not do its own
+  TLS. Prove auth end-to-end: `demo_client_auth.py`.
+
+## Concurrency & durability
+
+One process, one writer. `SqliteStore` holds a single connection and serializes every
+mutation behind one re-entrant lock, so concurrent callers cannot interleave a partial
+write — in particular the audit log's *read-prev-hash → insert* is atomic, which is what
+keeps the hash chain intact under load. `journal_mode=WAL` lets separate reader
+connections read while the writer is mid-burst without blocking or erroring. The HTTP
+server is threaded and additionally serializes request handling behind a per-server lock.
+Proven with real threads (and concurrent HTTP clients) in `tests/test_concurrency.py`
+and `demo_persistence.py`. This is a single-box story: there is no multi-writer or
+multi-node coordination, by design (ARCHITECTURE §4.8).
+
+## Schema validation boundary
+
+**ToolConnect validates the *shape of a tool's declared schema*; the caller validates
+*arguments*.** At grant (assertion) time, `toolconnect.schema.validate_input_schema`
+checks that the tool's declared `input_schema` is a structurally coherent JSON Schema —
+an object, with a `properties` that is an object, a `required` that lists names present
+in `properties`, and a known top-level `type`. An incoherent schema makes the assertion
+fail with `422`: an operator cannot vouch for a tool whose own input contract is broken.
+ToolConnect does **not** validate a call's arguments against the schema — it never sees
+the arguments, because it is never in the data path. Argument validation is the invoking
+runtime's job (ARCHITECTURE §5/§8). See `demo_ops.py`.
+
+## Backup, restore, and migration
+
+* **Backup:** `toolconnect backup --db X --out Y` writes a transactionally consistent
+  snapshot via SQLite's online-backup API — safe against a live service, no quiesce
+  needed. The command re-opens the copy and verifies its audit chain before reporting
+  success.
+* **Restore:** open (or move into place) the snapshot. It is a complete, governing
+  database; the hash chain round-trips byte-for-byte, so a restored backup verifies.
+* **Migration:** the store migrates a legacy database forward on open. The baseline is
+  the RC1 (schema v1) shape, so a fresh database and a migrated legacy one converge on
+  identical structure. Migrations are additive and leave the hash chain untouched; a
+  database at a version **newer** than the running build is refused, not opened.
+
+Proven in `tests/test_backup_migration.py` and `demo_persistence.py`.
+
+## Operator CLI
+
+Beyond `serve` and `init-db`, for operators and cron jobs (all read a `--db`, exit
+non-zero on a finding so they can gate a pipeline):
+
+| Command | Purpose |
+|---|---|
+| `toolconnect ingest-openapi --db X --source SID --spec F [--tier T]` | ingest a local OpenAPI 3.x spec (JSON/YAML) as claimed capabilities; exit non-zero on a spec fault, nothing partially ingested |
+| `toolconnect verify-audit --db X` | walk the hash chain; exit `1` if broken (tamper/loss detection) |
+| `toolconnect drift --db X --source SID` | drift vs. the last discovery; exit `2` if drift exists |
+| `toolconnect backup --db X --out Y` | consistent snapshot; verifies the copy |
+| `toolconnect audit --db X [--kind K] [--limit N]` | print recent audit records, newest first |
+
+## Reference client
+
+`toolconnect.client.ToolConnectClient` is a stdlib-only, importable, fail-closed client
+for a running service — the artifact AgentConnect adopts. Config surface: `base_url`,
+`token`, `timeout`, with env fallback (`TOOLCONNECT_URL`/`TOOLCONNECT_TOKEN`/
+`TOOLCONNECT_TIMEOUT`) via `ToolConnectClient.from_config(...)`. A deny is a normal
+return value; unreachable / non-200 / incompatible-contract raises rather than returning
+an allow. There is no `invoke`. See `docs/AGENTCONNECT_CONTRACT.md` → *Reference client
+& wiring* and `demo_client_auth.py`.
+
+## Known limits (0.1.0)
+
+* `resolve_toolset` / ToolsetPack (contract §3) is not yet an HTTP route; toolset flow
+  analysis exists in the library (`analyze_toolset`) but is not exposed.
+* Active health probing (ARCHITECTURE §4.6) is not implemented; drift uses the last
+  discovery observation.
+* Single box: no multi-writer or multi-node coordination beyond the internal lock + WAL.
+* Argument-bound grants (contract 1.1) are, on their own, a PDP boundary rather than a
+  proxy: ToolConnect can make skipping `redeem` before execution *detectable* (a
+  dangling grant, auditable via `GET /grants?state=issued`) but cannot *prevent* a
+  caller that integrates directly against `authorize`/`redeem` and never calls redeem, nor
+  a caller that mutates its arguments after a successful redeem. The `gateway` (above)
+  closes this specific gap for any caller willing to run its tool traffic through it —
+  it physically forwards the call, so skipping authorize/redeem is not an option for a
+  gateway-routed caller — but a caller that talks to a downstream MCP server directly,
+  bypassing the gateway, is outside what any component in this repo can enforce. Cedar
+  policy itself is process-static (loaded once, at engine construction) — if policy
+  hot-reload is ever added, both `redeem`'s `invocable_check` and the gateway would need
+  to re-evaluate policy too, not just the catalog's assertion state.
