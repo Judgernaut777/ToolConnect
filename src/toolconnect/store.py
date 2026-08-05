@@ -236,7 +236,7 @@ def asserted_to_json(a: AssertedDescriptor) -> str:
         "effect": a.effect.value,
         "reads": sorted(c.value for c in a.reads),
         "writes": sorted(c.value for c in a.writes),
-        "scopes": sorted(a.scopes),
+        "scopes": sorted(c.value for c in a.scopes),
         "reversible": a.reversible,
         "idempotent": a.idempotent,
         "requires_approval": a.requires_approval,
@@ -251,7 +251,7 @@ def asserted_from_json(raw: str) -> AssertedDescriptor:
         effect=Effect(d["effect"]),
         reads=frozenset(DataClass(c) for c in d.get("reads", ())),
         writes=frozenset(DataClass(c) for c in d.get("writes", ())),
-        scopes=frozenset(d.get("scopes", ())),
+        scopes=frozenset(DataClass(c) for c in d.get("scopes", ())),
         reversible=d.get("reversible", True),
         idempotent=d.get("idempotent", False),
         requires_approval=d.get("requires_approval", False),
@@ -434,7 +434,7 @@ class SqliteStore:
         cat = Catalog()
         with self._lock:
             for sid, tier, transport, declared in self._conn.execute(
-                    "SELECT source_id, tier, transport, declared FROM sources"):
+                    "SELECT source_id, name, tier, transport, declared FROM sources"):
                 cat.sources[sid] = TrustedSource(
                     source_id=sid, tier=TrustTier(tier), transport=transport)
                 cat.declared[sid] = set(json.loads(declared))
@@ -533,6 +533,22 @@ class SqliteStore:
         """Append one hash-chained audit record; returns its sequence number."""
         with self._lock, self._conn:
             return self._append_audit_in_txn(kind, body)
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Upsert one ``meta`` row (durable key/value; used for deployment
+        posture facts such as the loaded ADR-052 revocation list's identity)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value))
+
+    def get_meta(self, key: str) -> str | None:
+        """Read one ``meta`` row; ``None`` when the key was never recorded."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row is not None else None
 
     def read_audit(self, kind: str | None = None, limit: int = 100) -> list[dict]:
         q = "SELECT seq, kind, body, created_at, record_hash FROM audit"
@@ -690,8 +706,8 @@ class SqliteStore:
             self._conn.execute("BEGIN IMMEDIATE")
             # The expiry clock is read AFTER the lock and transaction are held, so a
             # redeem that queued behind another grant operation (or a slow
-            # invocable_check) for longer than the remaining TTL is judged against
-            # the time the check actually runs — a pre-queue snapshot would let an
+            # invocable_check) for longer than the remaining TTL is judged against the
+            # time the check actually runs — a pre-queue snapshot would let an
             # already-expired grant redeem, violating inclusive-deny.
             now = datetime.now(timezone.utc)
             try:
