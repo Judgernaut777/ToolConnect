@@ -39,8 +39,9 @@ Full report: **[PHASE1_VALIDATION.md](PHASE1_VALIDATION.md)**. Summary:
   53-tool catalog. But every finding on a realistic toolset traced to a worst-case label a static
   descriptor cannot justify, and it is a **grant-time review artifact, not a runtime denial rule.**
   Descriptors must bind to `(tool, scope)`.
-* ⚠️ **Differentiation: 2 of 3 claims hold; the third is unproven, not failed.** "Protocol-neutral"
-  was never tested — every tool ingested was MCP-shaped.
+* ⚠️ **Differentiation: 2 of 3 claims hold; the third is now proven, narrowly.** "Protocol-neutral"
+  passed its Phase-2 gate for OpenAPI 3.x ingest (read-only registry path, local spec files,
+  no execution). It remains unproven for every other protocol.
 * ➕ **Catalog drift found in a real repository.** AgentConnect's spec §17 documents a review loop
   (`claim_review`, `complete_review`, `get_manager_inbox`) that its MCP adapter does not expose.
   Detected by comparing two lists; no tool was invoked. AgentConnect was not modified.
@@ -49,9 +50,19 @@ Full report: **[PHASE1_VALIDATION.md](PHASE1_VALIDATION.md)**. Summary:
 
 1. **Product question (the user's).** Does a grant-time review artifact justify a separate
    platform, rather than a feature contributed to IBM ContextForge?
-2. **Technical proof (ours).** Ingest a real OpenAPI document via `FastMCP.from_openapi` into the
-   same catalog beside the MCP tools. If it needs an MCP-shaped intermediate representation,
-   "protocol-neutral" has failed, leaving one claim standing, and the abandonment rule applies.
+2. **Technical proof (ours).** Ingest a real OpenAPI document into the same catalog beside the
+   MCP tools, without an MCP-shaped intermediate representation. ~~If it needs one,
+   "protocol-neutral" has failed and the abandonment rule applies.~~ **Proven** (see
+   [STATUS.md](STATUS.md) → Open questions): `openapi_source` parses an OpenAPI 3.x document
+   directly into ToolConnect's own descriptor/claim model — one capability per `operationId`
+   (or `{method}_{path}` fallback), parameters and JSON request bodies merged into the input
+   schema, HTTP-method semantics crosswalked into `claimed_*` hints exactly as MCP annotations
+   are — and the same assertion, Cedar authorization, drift, and audit path works over it with
+   no special-casing. `toolconnect ingest-openapi path/to/spec.yaml` is the operator surface.
+   Scope of the proof: OpenAPI 3.x, local spec files (no network fetch), the read-only
+   registry path only — nothing about execution, which remains deliberately absent. The proof
+   deliberately does **not** use `FastMCP.from_openapi`, because routing the document through
+   an MCP-shaped intermediate would have conceded the gate instead of passing it.
 
 ---
 
@@ -70,8 +81,9 @@ The catalog, and the artifact that does not exist in any standard.
   first-class query.
 * SQLite catalog, reconciler loop, monotonic cursor for `watch()`.
 * Trust tiers and human promotion. Catalog and health as separate records.
-* `ToolSourceAdapter` for MCP (`tools/list` ingest via the MCP Python SDK) and OpenAPI (via
-  FastMCP's `from_openapi`).
+* `ToolSourceAdapter` for MCP (`tools/list` ingest over stdio) and OpenAPI (direct document
+  parse in `openapi_source` — the original `FastMCP.from_openapi` sketch was rejected because
+  an MCP-shaped intermediate would concede the protocol-neutral gate).
 * The `x-toolconnect-*` extension convention, applied to third-party specs via OpenAPI Overlay
   1.1.0 rather than by forking them.
 

@@ -220,6 +220,28 @@ distinct and that bare-name resolution fails closed on the ambiguity. Discovery,
 normalization, and all six fault classes are exercised against both
 (`tests/test_multi_server.py`, `demo_multi_server.py`).
 
+## OpenAPI source adapter (protocol-neutral proof)
+
+`toolconnect.openapi_source.load_openapi(path)` parses a **local** OpenAPI 3.x spec
+file (JSON, or YAML when PyYAML is installed — JSON never depends on it) and normalizes
+it into the same `DiscoveryResult` / `DiscoveredTool` / `ClaimedMetadata` structures the
+MCP adapter produces: one capability per `operationId` (`{method}_{path}` fallback when
+absent), parameters and a JSON `requestBody` schema merged into the descriptor's input
+schema, and HTTP-method semantics crosswalked into `claimed_*` hints (GET/HEAD/OPTIONS →
+`read_only_hint`; DELETE → `destructive_hint`; other writes → `open_world_hint`) —
+recorded, diffed, never consulted for policy, exactly like MCP annotations. Ingest then
+goes through the unchanged push path (`ingest_payload`), so assertion, Cedar
+authorization, drift, and audit behave identically with no special-casing.
+
+The operator surface is `toolconnect ingest-openapi --db DB --source SID --spec
+path/to/spec.yaml [--tier T]`. There is deliberately **no network fetch and no endpoint
+execution** — the adapter reads a file and never calls what it ingests, so the offline
+gate stays offline and `grep -rn "def invoke" src/` still returns nothing. Failures
+fail closed as a typed `OpenAPISpecError` (`not_openapi`, `malformed_document`,
+`no_operations`, `duplicate_operation`, `invalid_parameter`, `unreadable`) and never
+ingest a partial document. Covered by `tests/test_openapi_source.py` against
+`fixtures/petstore_openapi.json` / `.yaml`.
+
 ## MCP enforcement gateway
 
 ```
@@ -320,6 +342,7 @@ non-zero on a finding so they can gate a pipeline):
 
 | Command | Purpose |
 |---|---|
+| `toolconnect ingest-openapi --db X --source SID --spec F [--tier T]` | ingest a local OpenAPI 3.x spec (JSON/YAML) as claimed capabilities; exit non-zero on a spec fault, nothing partially ingested |
 | `toolconnect verify-audit --db X` | walk the hash chain; exit `1` if broken (tamper/loss detection) |
 | `toolconnect drift --db X --source SID` | drift vs. the last discovery; exit `2` if drift exists |
 | `toolconnect backup --db X --out Y` | consistent snapshot; verifies the copy |
