@@ -317,7 +317,7 @@ def _cmd_drift(args) -> int:
         "source_id": report.source_id,
         "clean": report.clean,
         "summary": report.summary(),
-        "observed_at": report.observed_at,
+        "observed_at": observed_at,
         "advertised_missing": list(report.advertised_missing),
         "undeclared_present": list(report.undeclared_present),
         "unasserted": list(report.unasserted),
@@ -333,7 +333,7 @@ def _cmd_drift(args) -> int:
                            ("unasserted", "unasserted"),
                            ("redefined-after-assertion", "redefined_after_assertion")):
             if payload[key]:
-                print(f"  {label}: {json.dumps(payload[key])}")
+                print(f"  {label}: {', '.join(payload[key])}")
         for name, msg in report.claim_conflicts:
             print(f"  claim-conflict {name}: {msg}")
     return 0 if report.clean else 2
