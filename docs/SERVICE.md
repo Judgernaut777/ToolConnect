@@ -70,8 +70,9 @@ Errors are `{"error": {"status": N, "message": "..."}}`.
 | `POST /grants/{grant_id}/close` | explicitly close a grant (e.g. abandon in a `finally`); idempotent; unknown id is `404` |
 | `GET /grants/{grant_id}` | one grant's stored fields plus its **computed** status (`issued`\|`redeemed`\|`expired`\|`closed`) |
 | `GET /grants?state=&limit=` | grants filtered by computed status, newest-issued-first — how an operator finds a dangling (never redeemed or closed) grant |
+| `POST /redemptions` | redeem a **Connect-Governance execution grant** at the point of effect: `{grant, principal, source_id, name, args, at?}` → verifies the Ed25519 signature against the configured governance trust root, binds grant scope to the tool call, consumes the grant one-use atomically, and writes a `provider_enforcement` record (a Provider Enforcement Record) either way — see *Governance grant redemption* below |
 | `POST /decisions/{decision_id}/outcome` | close the loop: `{outcome, detail?, grant_id?}`; `detail`, when present, must be a JSON object (`400` otherwise); unknown ids are `404`; `grant_id`, when given, closes that grant in the same call and adds `"grant_closed": true` to the response |
-| `GET /audit?kind=&limit=` | newest-first audit records (kinds: `decision`, `outcome`, `ingest`, `assertion`, `drift`, `source`, `grant_issue`, `grant_redeem`, `grant_redeem_denied`, `grant_close`) |
+| `GET /audit?kind=&limit=` | newest-first audit records (kinds: `decision`, `outcome`, `ingest`, `assertion`, `drift`, `source`, `grant_issue`, `grant_redeem`, `grant_redeem_denied`, `grant_close`, `provider_enforcement`) |
 | `GET /audit/verify` | walk the hash chain; reports the first broken record |
 
 ### The Decision shape
@@ -191,6 +192,43 @@ outcome reporting is best-effort: an audit-path outage never destroys a result t
 already ran; the grant is left visibly "redeemed but never closed" instead, which is
 truthful and auditable.
 
+### Governance grant redemption (Connect-Governance execution grants)
+
+`POST /redemptions` is the point-of-effect redemption of a **Connect-Governance
+execution grant** (R4 artifact: canonical JSON + Ed25519 signature, issued only over an
+`Allowed` Decision Record). This is the first cross-plane enforcement seam: governance
+authorizes the organizational commitment, ToolConnect enforces it where the tool call
+would happen. The artifact format and provider obligations are pinned by
+Connect-Governance's `docs/REDEMPTION_CONTRACT.md`; ToolConnect verifies offline with a
+vendored Ed25519 verifier (`toolconnect.govgrants`, `cryptography>=42`) — there is **no
+import or network dependency** on the governance repo, and byte-compatibility is proven
+against all five governance conformance vectors (`tests/test_govgrant_vectors.py`).
+
+* **Trust root.** `serve` takes the governance public key(s) as configuration
+  (`gov_trust_root_pem`, plus `gov_provider_id` naming this provider in records). A
+  server with no trust root configured denies every redemption with
+  `missing_trust_root`. An optional expected-key-id pin distinguishes `unknown_issuer`
+  from `signature_mismatch` — a forged attribution fails as the wrong key, not as a bad
+  signature.
+* **Verification is pure.** No wall clock: the validity window is checked against the
+  request's `at` instant (half-open, same rule as the issuer); no network, no
+  filesystem. Malformed grants, unsupported schemes, and wrong formats are typed
+  failure codes, never exceptions.
+* **Scope binding.** The grant's authorized scope must cover this exact call:
+  `provider_id`, `tool.invoke` in `permitted_operations`, the principal, and
+  `argument_constraints["tool"]` (required) naming the tool; any other constraint key
+  demands exact equality with the submitted `args`. A scope miss denies.
+* **One-use, atomically.** The grant id is the primary key of the `grant_redemptions`
+  table (schema v5); claim and audit record commit in one `BEGIN IMMEDIATE`
+  transaction. A replay — even racing on 12 threads — gets exactly one winner;
+  `already_redeemed` denies the rest with the chain intact. A *failed* verification
+  does not consume the grant.
+* **Every outcome is a Provider Enforcement Record.** Success or deny, a
+  `provider_enforcement` record lands on the same hash-chained audit log:
+  `grant_id`, `decision_record_id`, `correlation_id`, verification result, outcome
+  (`redeemed` / `denied:<reason>`), failure codes, args hash, and the `at` instant used.
+  Denials are decisions, not errors — HTTP `200` with the reason, mirroring `/authorize`.
+
 ### Failure semantics (fail closed, everywhere)
 
 * MCP discovery faults — `timeout`, `malformed_json`, `truncated_response`,
@@ -201,6 +239,10 @@ truthful and auditable.
 * A vouched tool whose claim changed (`redefined_after_assertion`) loses invocability
   until a human re-asserts; re-announcing the identical claim is a no-op.
 * An engine error is a denial. A missing decision is never an allow.
+* A governance-grant redemption that cannot be positively verified — bad signature,
+  unknown issuer, expired or not-yet-valid window, scope mismatch, replay, or a missing
+  trust root — is a denial, and the denial itself is recorded as a
+  `provider_enforcement` record.
 
 ## MCP source adapter
 
@@ -377,3 +419,10 @@ an allow. There is no `invoke`. See `docs/AGENTCONNECT_CONTRACT.md` → *Referen
   policy itself is process-static (loaded once, at engine construction) — if policy
   hot-reload is ever added, both `redeem`'s `invocable_check` and the gateway would need
   to re-evaluate policy too, not just the catalog's assertion state.
+* Governance-grant revocation is **window-based only** for the slice (ADR-052 in
+  Connect-Governance): an issued grant is revocable in practice by keeping validity
+  windows short and rotating the issuer key (the kill switch); revocation-list
+  *propagation* to providers is defined but deliberately not built until the audit-trail
+  phase. The redemption `at` instant is caller-settable by design (deterministic
+  verification); a production caller must supply a trusted timestamp — ToolConnect does
+  not yet pin one for it.

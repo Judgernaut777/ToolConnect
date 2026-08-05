@@ -1,0 +1,92 @@
+{
+  "vector_id": "gv-005-key-rotation",
+  "description": "A grant signed by the SAME keypair still fails when the verifier requires a DIFFERENT expected key id (rotation scenario).",
+  "normative_reference": "ADR-051 key custody and rotation",
+  "spec_version": "1",
+  "grant_format_version": "1",
+  "private_key_pem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIDkN5Il+uD9CLnuM+KTlqM+bKDnJql49TksMqQZ8Z3Kh\n-----END PRIVATE KEY-----\n",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA/XluIVKX4rL4Za5ar1AYWE26XHAjLGGYAoycsyl+/m0=\n-----END PUBLIC KEY-----\n",
+  "expected_key_id": "ed25519:0000000000000000000000000000000000000000000000000000000000000000",
+  "payload": {
+    "argument_constraints": {
+      "path": "/srv/out",
+      "tool": "fs.write"
+    },
+    "budget_limit_usd": 100.0,
+    "correlation_id": "corr-1",
+    "data_classifications": [
+      "internal"
+    ],
+    "decision_record_id": "dr-vec-1",
+    "delegation_depth": 0,
+    "delegation_max_depth": 1,
+    "grant_format_version": "1",
+    "grant_id": "g-vec-1",
+    "issued_at": "2026-08-03T12:00:00Z",
+    "issuer_key_id": "ed25519:f294dcbe2bea2831af6df47eaf039ec5b7b223644dd1689f63be2d90bb5d800a",
+    "kernel_version": "0.0.1",
+    "not_after": "2026-08-04T00:00:00Z",
+    "not_before": "2026-08-03T00:00:00Z",
+    "organization_id": "org-1",
+    "permitted_operations": [
+      "tool.invoke"
+    ],
+    "policy_versions": [
+      "pol-1@3"
+    ],
+    "provider_id": "toolconnect",
+    "requesting_principal_id": "agent-1",
+    "revocation_state": "active",
+    "work_request_id": "wr-1",
+    "work_request_revision": "rev-1",
+    "workspace_id": "ws-1"
+  },
+  "verify_at": "2026-08-03T12:00:00Z",
+  "expected_grant": {
+    "payload": {
+      "argument_constraints": {
+        "path": "/srv/out",
+        "tool": "fs.write"
+      },
+      "budget_limit_usd": 100.0,
+      "correlation_id": "corr-1",
+      "data_classifications": [
+        "internal"
+      ],
+      "decision_record_id": "dr-vec-1",
+      "delegation_depth": 0,
+      "delegation_max_depth": 1,
+      "grant_format_version": "1",
+      "grant_id": "g-vec-1",
+      "issued_at": "2026-08-03T12:00:00Z",
+      "issuer_key_id": "ed25519:f294dcbe2bea2831af6df47eaf039ec5b7b223644dd1689f63be2d90bb5d800a",
+      "kernel_version": "0.0.1",
+      "not_after": "2026-08-04T00:00:00Z",
+      "not_before": "2026-08-03T00:00:00Z",
+      "organization_id": "org-1",
+      "permitted_operations": [
+        "tool.invoke"
+      ],
+      "policy_versions": [
+        "pol-1@3"
+      ],
+      "provider_id": "toolconnect",
+      "requesting_principal_id": "agent-1",
+      "revocation_state": "active",
+      "work_request_id": "wr-1",
+      "work_request_revision": "rev-1",
+      "workspace_id": "ws-1"
+    },
+    "signature": "bL8rFJb2UEnFvg2i8gdPjXaMkuCKoGSXEjnzUPhtlutQ4kqUa-HWHI4Wj6PblYHD9ZBIfyteALwLZlhgZJl3CA",
+    "signature_scheme": "Ed25519"
+  },
+  "expected_verification": {
+    "valid": false,
+    "signature_valid": true,
+    "within_validity_window": true,
+    "failure_codes": [
+      "key_id_mismatch"
+    ],
+    "issuer_key_id": "ed25519:f294dcbe2bea2831af6df47eaf039ec5b7b223644dd1689f63be2d90bb5d800a"
+  }
+}

@@ -50,7 +50,7 @@ BASELINE_VERSION = 1
 #: The current schema version. A database at an older version is migrated forward on
 #: open (see ``_MIGRATIONS``); a database at a *newer* version is refused, because this
 #: code cannot know what a future migration changed.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class SchemaTooNewError(RuntimeError):
@@ -149,6 +149,13 @@ CREATE TABLE IF NOT EXISTS audit (
 #: never deleted (auditable dangling-grant detection), and no raw call arguments are
 #: ever stored here — only their hash. Purely additive: a new table plus an index, no
 #: existing column or row touched, so a migrated database's hash chain is unaffected.
+#: v5 (this release): governance-grant redemptions (``grant_redemptions`` table). One
+#: row per successfully redeemed Connect-Governance execution grant, keyed by the
+#: grant id — the primary key is what makes one-use semantics atomic under the
+#: single-writer discipline. Denied attempts are recorded only on the audit chain
+#: (kind ``provider_enforcement``), never in this table, so the table is exactly the
+#: set of redeemed grants and the primary key is exactly the replay guard. No raw
+#: call arguments are stored here either — only their hash. Purely additive.
 _MIGRATIONS: dict[int, list[str]] = {
     2: [
         "ALTER TABLE sources ADD COLUMN label TEXT",
@@ -173,6 +180,20 @@ _MIGRATIONS: dict[int, list[str]] = {
         " redeemed_at  TEXT,"
         " closed_at    TEXT)",
         "CREATE INDEX IF NOT EXISTS idx_grants_decision ON grants(decision_id)",
+    ],
+    5: [
+        "CREATE TABLE IF NOT EXISTS grant_redemptions ("
+        " grant_id           TEXT PRIMARY KEY,"
+        " decision_record_id TEXT NOT NULL,"
+        " correlation_id     TEXT,"
+        " issuer_key_id      TEXT NOT NULL,"
+        " provider_id        TEXT NOT NULL,"
+        " principal_id       TEXT NOT NULL,"
+        " source_id          TEXT NOT NULL,"
+        " name               TEXT NOT NULL,"
+        " args_hash          TEXT NOT NULL,"
+        " verification_at    TEXT NOT NULL,"
+        " redeemed_at        TEXT NOT NULL)",
     ],
 }
 
@@ -734,6 +755,70 @@ class SqliteStore:
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
+
+    def record_govgrant_redemption(self, *, grant_id: str, decision_record_id: str,
+                                   correlation_id: str | None, issuer_key_id: str,
+                                   provider_id: str, principal_id: str,
+                                   source_id: str, name: str, args_hash: str,
+                                   verification_at: str,
+                                   audit_body: Mapping[str, Any]) -> dict:
+        """Atomically claim one-use of a governance grant and append its Provider
+        Enforcement Record. Call only after verification and scope checks have
+        PASSED — denied attempts are audited by the caller and never reach here.
+
+        Returns ``{"redeemed": bool, "reason": "ok" | "already_redeemed",
+        "redeemed_at": str | None}``. The INSERT into ``grant_redemptions``
+        (primary key = grant id) and the ``provider_enforcement`` audit record
+        commit or roll back together (ADR 0002 §4): a redemption is never
+        durable without its enforcement record, and a replay is never recorded
+        as a second redemption row.
+
+        Same transaction discipline as :meth:`redeem_grant`: manual
+        ``BEGIN IMMEDIATE``/``COMMIT``/``ROLLBACK`` so the connection's
+        ``isolation_level`` is untouched, redundant with ``self._lock`` as
+        deliberate defense-in-depth.
+        """
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                redeemed_at = _now()
+                try:
+                    self._conn.execute(
+                        "INSERT INTO grant_redemptions(grant_id, decision_record_id,"
+                        " correlation_id, issuer_key_id, provider_id, principal_id,"
+                        " source_id, name, args_hash, verification_at, redeemed_at)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (grant_id, decision_record_id, correlation_id, issuer_key_id,
+                         provider_id, principal_id, source_id, name, args_hash,
+                         verification_at, redeemed_at))
+                except sqlite3.IntegrityError:
+                    # The grant id is already claimed: a replay. Deny. The denial
+                    # itself is recorded by the caller on the audit chain.
+                    self._conn.execute("ROLLBACK")
+                    return {"redeemed": False, "reason": "already_redeemed",
+                            "redeemed_at": None}
+                body = dict(audit_body)
+                body["redeemed_at"] = redeemed_at
+                self._append_audit_in_txn("provider_enforcement", body)
+                self._conn.execute("COMMIT")
+                return {"redeemed": True, "reason": "ok", "redeemed_at": redeemed_at}
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def get_govgrant_redemption(self, grant_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT grant_id, decision_record_id, correlation_id, issuer_key_id,"
+                " provider_id, principal_id, source_id, name, args_hash,"
+                " verification_at, redeemed_at"
+                " FROM grant_redemptions WHERE grant_id=?", (grant_id,)).fetchone()
+            if row is None:
+                return None
+            cols = ("grant_id", "decision_record_id", "correlation_id",
+                    "issuer_key_id", "provider_id", "principal_id", "source_id",
+                    "name", "args_hash", "verification_at", "redeemed_at")
+            return dict(zip(cols, row))
 
     def close_grant(self, grant_id: str, *, reason: str = "explicit_close") -> dict | None:
         """Idempotent. Closes the grant (if not already) and appends its
