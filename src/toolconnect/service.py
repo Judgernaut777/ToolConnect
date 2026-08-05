@@ -128,7 +128,7 @@ def _tool_payload(svc: "ToolConnectService", source_id: str, name: str) -> dict:
             "effect": tv.asserted.effect.value,
             "reads": sorted(c.value for c in tv.asserted.reads),
             "writes": sorted(c.value for c in tv.asserted.writes),
-            "scopes": sorted(c.value for c in tv.asserted.scopes),
+            "scopes": sorted(tv.asserted.scopes),
             "reversible": tv.asserted.reversible,
             "idempotent": tv.asserted.idempotent,
             "requires_approval": tv.asserted.requires_approval,
@@ -137,7 +137,7 @@ def _tool_payload(svc: "ToolConnectService", source_id: str, name: str) -> dict:
         },
         "assertion_status": svc.catalog.assertion_status(source_id, name).value,
         "invocable": svc.catalog.invocable(source_id, name),
-        "claim_conflicts": [list(c) for c in tv.claim_conflicts()],
+        "claim_conflicts": tv.claim_conflicts(),
         "input_schema": dict(tv.input_schema),
     }
 
@@ -223,15 +223,15 @@ class ToolConnectService:
         if command is not None and (
                 not isinstance(command, list) or not all(isinstance(c, str) for c in command)):
             raise ServiceError(400, "command must be a list of argv strings")
-        source = TrustedSource(source_id=source_id, tier=tier, transport=transport)
+        source = TrustedSource(source_id=source_id, tier=trust, transport=transport)
         self.catalog.register_source(source, declares=set(declares or ()))
         self.store.upsert_source(source, declares=declares or (), command=command)
         self.store.append_audit("source", {
-            "event": "registered", "source_id": source_id, "tier": tier.value,
+            "event": "registered", "source_id": source_id, "tier": trust.value,
             "transport": transport, "declares": sorted(declares or ()),
             "has_command": command is not None,
         })
-        return {"source_id": source_id, "tier": tier.value, "transport": transport}
+        return {"source_id": source_id, "tier": trust.value, "transport": transport}
 
     def list_sources(self) -> list[dict]:
         return [
@@ -281,7 +281,7 @@ class ToolConnectService:
             "server_name": result.server_name,
             "server_version": result.server_version,
             "protocol_version": result.protocol_version,
-            "ingested": sorted(ingested),
+            "tools": sorted(ingested),
         })
         drift = self.catalog.drift(source_id, discovered)
         self.store.append_audit("drift", {
@@ -331,7 +331,7 @@ class ToolConnectService:
             "source_id": source_id, "ok": True, "push": True,
             "tools": sorted(ingested),
         })
-        return {"source_id": source_id, "ingested": list(ingested)}
+        return {"source_id": source_id, "ingested": sorted(ingested)}
 
     # -- catalog --------------------------------------------------------------------
 
@@ -408,7 +408,8 @@ class ToolConnectService:
             "advertised_missing": list(drift.advertised_missing),
             "undeclared_present": list(drift.undeclared_present),
             "unasserted": list(drift.unasserted),
-            "claim_conflicts": [list(c) for c in drift.claim_conflicts()],
+            "claim_conflicts": [list(c) for c in drift.claim_conflicts],
+            "redefined_after_assertion": list(drift.redefined_after_assertion),
         }
 
     def drift(self, source_id: str) -> dict:
