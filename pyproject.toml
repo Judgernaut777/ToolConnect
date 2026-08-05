@@ -16,7 +16,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "hypothesis>=6"]
+# pyyaml: two registry/audit tests load YAML fixtures and silently skip without
+# it (independent-verifier finding, R7). Declared so `pip install -e .[dev]`
+# runs the full suite.
+dev = ["pytest>=8", "hypothesis>=6", "pyyaml>=6"]
 
 [project.scripts]
 toolconnect = "toolconnect.cli:main"
