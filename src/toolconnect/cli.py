@@ -32,6 +32,54 @@ def _load_config(path: str | None) -> dict:
     return data
 
 
+def _gov_arg(parser: argparse.ArgumentParser) -> None:
+    """The governance trust material flags, identical on every subcommand that
+    builds a service (R7). Precedence: flag > env var > --config key > None;
+    None means the legacy R5 posture (no trust root → redemptions fail closed
+    ``missing_trust_root``; no revocation list → R5 verification unchanged)."""
+    parser.add_argument("--gov-trust-root", dest="gov_trust_root",
+                        help="path to the Connect-Governance issuer's Ed25519 "
+                             "public key PEM (env TOOLCONNECT_GOV_TRUST_ROOT)")
+    parser.add_argument("--gov-revocation-list", dest="gov_revocation_list",
+                        help="path to an ADR-052 revocation-list JSON document "
+                             "(env TOOLCONNECT_GOV_REVOCATION_LIST)")
+
+
+def _load_governance(args, cfg: dict):
+    """Resolve (gov_trust_root_pem, gov_revocation_list) for service construction.
+
+    Files that are named but unreadable/unparseable are a startup error, never
+    a silent fall-through: an operator who configured revocation evidence must
+    not get a decision point quietly running without it (fail closed at boot).
+    """
+    trust_root_path = (args.gov_trust_root
+                       or os.environ.get("TOOLCONNECT_GOV_TRUST_ROOT")
+                       or cfg.get("gov_trust_root"))
+    list_path = (args.gov_revocation_list
+                 or os.environ.get("TOOLCONNECT_GOV_REVOCATION_LIST")
+                 or cfg.get("gov_revocation_list"))
+    trust_root_pem = None
+    if trust_root_path:
+        p = Path(trust_root_path).expanduser()
+        if not p.exists():
+            raise SystemExit(f"governance trust root not found: {trust_root_path}")
+        trust_root_pem = p.read_text()
+    revocation_list = None
+    if list_path:
+        p = Path(list_path).expanduser()
+        if not p.exists():
+            raise SystemExit(f"governance revocation list not found: {list_path}")
+        try:
+            revocation_list = json.loads(p.read_text())
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                f"governance revocation list is not valid JSON: {list_path} ({exc})")
+        if not isinstance(revocation_list, dict):
+            raise SystemExit(
+                f"governance revocation list must be a JSON object: {list_path}")
+    return trust_root_pem, revocation_list
+
+
 def _cmd_version(_args) -> int:
     from . import __version__
     print(f"toolconnect {__version__}")
@@ -96,8 +144,11 @@ def _cmd_serve(args) -> int:
         # An unparseable policy set must never become a running server; refuse
         # with one actionable line instead of a traceback.
         raise SystemExit(f"{exc} (policy file: {policies_path})")
+    trust_root_pem, revocation_list = _load_governance(args, cfg)
     store = SqliteStore(db)
-    service = ToolConnectService(store, engine)
+    service = ToolConnectService(store, engine,
+                                 gov_trust_root_pem=trust_root_pem,
+                                 gov_revocation_list=revocation_list)
     auth_state = f"bearer (${token_env})" if token else "open (loopback)"
     rl_state = f"{rate_limit}/min/ip" if rate_limit > 0 else "off"
     print(f"toolconnect serving on http://{host}:{port} "
@@ -155,9 +206,12 @@ def _cmd_gateway(args) -> int:
     except ValueError as exc:
         raise SystemExit(f"{exc} (policy file: {policies_path})")
 
+    trust_root_pem, revocation_list = _load_governance(args, cfg)
     store = SqliteStore(db)
     try:
-        service = ToolConnectService(store, engine)
+        service = ToolConnectService(store, engine,
+                                     gov_trust_root_pem=trust_root_pem,
+                                     gov_revocation_list=revocation_list)
         principal = {"id": args.principal_id, "kind": args.principal_kind,
                     "privacy_tier": args.privacy_tier}
         try:
@@ -196,7 +250,10 @@ def _cmd_ingest_openapi(args) -> int:
         result = load_openapi(args.spec)
         # Ingest never authorizes, so no policy set is needed here; an empty one keeps
         # the construction honest without inventing permissions.
-        service = ToolConnectService(store, CedarPolicyEngine(""))
+        trust_root_pem, revocation_list = _load_governance(args, cfg)
+        service = ToolConnectService(store, CedarPolicyEngine(""),
+                                     gov_trust_root_pem=trust_root_pem,
+                                     gov_revocation_list=revocation_list)
         if args.source not in service.catalog.sources:
             service.register_source(args.source, tier=args.tier, transport="openapi")
         out = service.ingest_payload(args.source, discovery_to_payload(result))
@@ -260,7 +317,7 @@ def _cmd_drift(args) -> int:
         "source_id": report.source_id,
         "clean": report.clean,
         "summary": report.summary(),
-        "observed_at": observed_at,
+        "observed_at": report.observed_at,
         "advertised_missing": list(report.advertised_missing),
         "undeclared_present": list(report.undeclared_present),
         "unasserted": list(report.unasserted),
@@ -276,7 +333,7 @@ def _cmd_drift(args) -> int:
                            ("unasserted", "unasserted"),
                            ("redefined-after-assertion", "redefined_after_assertion")):
             if payload[key]:
-                print(f"  {label}: {', '.join(payload[key])}")
+                print(f"  {label}: {json.dumps(payload[key])}")
         for name, msg in report.claim_conflicts:
             print(f"  claim-conflict {name}: {msg}")
     return 0 if report.clean else 2
@@ -347,6 +404,7 @@ def main(argv: list[str] | None = None) -> int:
                               "non-loopback host")
     p_serve.add_argument("--rate-limit", dest="rate_limit", type=int,
                          help="requests per minute per client IP (0 = off)")
+    _gov_arg(p_serve)
     p_serve.add_argument("--config", help="TOML config file")
     p_serve.set_defaults(func=_cmd_serve)
 
@@ -366,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
                                 "was registered and ingested under")
     p_gateway.add_argument("--timeout", type=float, default=30.0,
                            help="per-call downstream timeout in seconds (default 30)")
+    _gov_arg(p_gateway)
     p_gateway.add_argument("--config", help="TOML config file")
     p_gateway.add_argument("downstream", nargs=argparse.REMAINDER,
                            help="the downstream MCP server command, after `--`")
@@ -382,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
                              help="trust tier when registering a new source "
                                   "(default untrusted)")
     p_ingest_oa.add_argument("--db", help="path to the SQLite database")
+    _gov_arg(p_ingest_oa)
     p_ingest_oa.add_argument("--config", help="TOML config file")
     p_ingest_oa.set_defaults(func=_cmd_ingest_openapi)
 
