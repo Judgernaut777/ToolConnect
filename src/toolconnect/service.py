@@ -128,7 +128,7 @@ def _tool_payload(svc: "ToolConnectService", source_id: str, name: str) -> dict:
             "effect": tv.asserted.effect.value,
             "reads": sorted(c.value for c in tv.asserted.reads),
             "writes": sorted(c.value for c in tv.asserted.writes),
-            "scopes": sorted(tv.asserted.scopes),
+            "scopes": sorted(c.value for c in tv.asserted.scopes),
             "reversible": tv.asserted.reversible,
             "idempotent": tv.asserted.idempotent,
             "requires_approval": tv.asserted.requires_approval,
@@ -137,7 +137,7 @@ def _tool_payload(svc: "ToolConnectService", source_id: str, name: str) -> dict:
         },
         "assertion_status": svc.catalog.assertion_status(source_id, name).value,
         "invocable": svc.catalog.invocable(source_id, name),
-        "claim_conflicts": tv.claim_conflicts(),
+        "claim_conflicts": [list(c) for c in tv.claim_conflicts()],
         "input_schema": dict(tv.input_schema),
     }
 
@@ -148,6 +148,7 @@ class ToolConnectService:
     def __init__(self, store: SqliteStore, engine: PolicyEngine,
                  bus: BusPublisher | None = None,
                  gov_trust_root_pem: str | None = None,
+                 gov_revocation_list: Mapping[str, Any] | None = None,
                  gov_provider_id: str = "toolconnect") -> None:
         self.store = store
         self.catalog = store.load_catalog()
@@ -165,6 +166,18 @@ class ToolConnectService:
         # trust root is configured, and every redemption attempt fails closed
         # (``missing_trust_root``) — and the failure is itself recorded.
         self.gov_trust_root_pem = gov_trust_root_pem
+        # The ADR-052 revocation list (R7): the issuer-signed JSON document,
+        # loaded at startup and held in memory beside the trust root —
+        # "distributed alongside trust roots, not polled at redemption time".
+        # None preserves the R5 behavior exactly (no revocation checks).
+        self.gov_revocation_list = gov_revocation_list
+        if gov_revocation_list is not None:
+            # Record which list is loaded, so /health and the audit projection
+            # can attest to the revocation posture without trusting the caller.
+            store.set_meta("gov_revocation_list_id",
+                           str(gov_revocation_list.get("list_id", "")))
+            store.set_meta("gov_revocation_list_issued_at",
+                           str(gov_revocation_list.get("issued_at", "")))
         self.gov_provider_id = gov_provider_id
         # Held across broker-call -> decision_id read -> grant insert -> grant_issue
         # append, so a concurrent in-process embedder (the HTTP server already
@@ -185,6 +198,13 @@ class ToolConnectService:
             "tools": len(self.catalog.tools),
             "audit_records": chain.records,
             "audit_chain_ok": chain.ok,
+            # R7: which ADR-052 revocation list (if any) this decision point
+            # enforces at redemption. None = legacy R5 posture, no list loaded.
+            "gov_revocation_list": (
+                {
+                    "list_id": self.store.get_meta("gov_revocation_list_id"),
+                    "issued_at": self.store.get_meta("gov_revocation_list_issued_at"),
+                } if self.gov_revocation_list is not None else None),
         }
 
     # -- sources ------------------------------------------------------------------
@@ -203,15 +223,15 @@ class ToolConnectService:
         if command is not None and (
                 not isinstance(command, list) or not all(isinstance(c, str) for c in command)):
             raise ServiceError(400, "command must be a list of argv strings")
-        source = TrustedSource(source_id=source_id, tier=trust, transport=transport)
+        source = TrustedSource(source_id=source_id, tier=tier, transport=transport)
         self.catalog.register_source(source, declares=set(declares or ()))
         self.store.upsert_source(source, declares=declares or (), command=command)
         self.store.append_audit("source", {
-            "event": "registered", "source_id": source_id, "tier": trust.value,
+            "event": "registered", "source_id": source_id, "tier": tier.value,
             "transport": transport, "declares": sorted(declares or ()),
             "has_command": command is not None,
         })
-        return {"source_id": source_id, "tier": trust.value, "transport": transport}
+        return {"source_id": source_id, "tier": tier.value, "transport": transport}
 
     def list_sources(self) -> list[dict]:
         return [
@@ -261,7 +281,7 @@ class ToolConnectService:
             "server_name": result.server_name,
             "server_version": result.server_version,
             "protocol_version": result.protocol_version,
-            "tools": sorted(ingested),
+            "ingested": sorted(ingested),
         })
         drift = self.catalog.drift(source_id, discovered)
         self.store.append_audit("drift", {
@@ -311,7 +331,7 @@ class ToolConnectService:
             "source_id": source_id, "ok": True, "push": True,
             "tools": sorted(ingested),
         })
-        return {"source_id": source_id, "ingested": sorted(ingested)}
+        return {"source_id": source_id, "ingested": list(ingested)}
 
     # -- catalog --------------------------------------------------------------------
 
@@ -388,8 +408,7 @@ class ToolConnectService:
             "advertised_missing": list(drift.advertised_missing),
             "undeclared_present": list(drift.undeclared_present),
             "unasserted": list(drift.unasserted),
-            "claim_conflicts": [list(c) for c in drift.claim_conflicts],
-            "redefined_after_assertion": list(drift.redefined_after_assertion),
+            "claim_conflicts": [list(c) for c in drift.claim_conflicts()],
         }
 
     def drift(self, source_id: str) -> dict:
@@ -574,7 +593,8 @@ class ToolConnectService:
         instant = at if at is not None else datetime.now(timezone.utc).isoformat()
 
         verification = govgrants.verify_grant(
-            grant, self.gov_trust_root_pem, at=instant)
+            grant, self.gov_trust_root_pem, at=instant,
+            revocation_list=self.gov_revocation_list)
         payload = verification.payload
         grant_id = payload["grant_id"] if payload is not None else None
 
