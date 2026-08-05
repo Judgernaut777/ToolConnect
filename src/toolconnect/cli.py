@@ -174,6 +174,44 @@ def _cmd_gateway(args) -> int:
         store.close()
 
 
+def _cmd_ingest_openapi(args) -> int:
+    """Ingest a local OpenAPI 3.x spec file into the catalog as claimed capabilities.
+
+    The protocol-neutral proof's operator surface: same ingest semantics as the MCP
+    path (claims recorded, never trusted; assertion and authorization unchanged),
+    driven from a document instead of a live stdio server. Offline by construction —
+    the spec is a local file, never a fetched URL.
+    """
+    from .openapi_source import OpenAPISpecError, discovery_to_payload, load_openapi
+    from .policy import CedarPolicyEngine
+    from .service import ToolConnectService
+    from .store import SqliteStore
+
+    cfg = _load_config(args.config)
+    db = args.db or cfg.get("db")
+    if not db:
+        raise SystemExit("ingest-openapi requires --db PATH (or `db` in --config)")
+    store = SqliteStore(str(Path(db).expanduser()))
+    try:
+        result = load_openapi(args.spec)
+        # Ingest never authorizes, so no policy set is needed here; an empty one keeps
+        # the construction honest without inventing permissions.
+        service = ToolConnectService(store, CedarPolicyEngine(""))
+        if args.source not in service.catalog.sources:
+            service.register_source(args.source, tier=args.tier, transport="openapi")
+        out = service.ingest_payload(args.source, discovery_to_payload(result))
+    except OpenAPISpecError as exc:
+        # A failed ingest is one actionable line, not a traceback — and nothing was
+        # ingested (parse_openapi never returns a partial result).
+        raise SystemExit(f"openapi ingest failed ({exc.kind}): {exc}")
+    finally:
+        store.close()
+    print(f"ingested {len(out['ingested'])} capabilities from {args.spec} into "
+          f"{args.source!r} ({result.server_name} {result.server_version}, "
+          f"{result.protocol_version}): {', '.join(out['ingested'])}")
+    return 0
+
+
 def _cmd_verify_audit(args) -> int:
     """Walk the audit hash chain and report. Exit non-zero if it is broken — this is
     the shape an operator's cron job or health check wants."""
@@ -332,6 +370,20 @@ def main(argv: list[str] | None = None) -> int:
     p_gateway.add_argument("downstream", nargs=argparse.REMAINDER,
                            help="the downstream MCP server command, after `--`")
     p_gateway.set_defaults(func=_cmd_gateway)
+
+    p_ingest_oa = sub.add_parser(
+        "ingest-openapi",
+        help="ingest a local OpenAPI 3.x spec file as claimed capabilities")
+    p_ingest_oa.add_argument("--spec", required=True,
+                             help="path to the OpenAPI spec file (JSON or YAML)")
+    p_ingest_oa.add_argument("--source", required=True,
+                             help="source_id to ingest under (registered if new)")
+    p_ingest_oa.add_argument("--tier", default="untrusted",
+                             help="trust tier when registering a new source "
+                                  "(default untrusted)")
+    p_ingest_oa.add_argument("--db", help="path to the SQLite database")
+    p_ingest_oa.add_argument("--config", help="TOML config file")
+    p_ingest_oa.set_defaults(func=_cmd_ingest_openapi)
 
     p_verify = sub.add_parser("verify-audit",
                               help="walk the audit hash chain; exit 1 if broken")

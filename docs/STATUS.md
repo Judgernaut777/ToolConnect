@@ -7,9 +7,13 @@ SQLite persistence, a loopback HTTP service (`toolconnect serve`, 127.0.0.1:8095
 stdio discovery adapter, an installable wheel with a CLI, argument-bound one-use grants
 (contract 1.1, [adr/0002](adr/0002-argument-bound-grants.md)), and `toolconnect gateway` — an
 optional MCP stdio enforcement proxy (a first-party PEP) in front of exactly one downstream
-server ([adr/0003](adr/0003-mcp-enforcement-gateway.md)). See [SERVICE.md](SERVICE.md).
+server ([adr/0003](adr/0003-mcp-enforcement-gateway.md)), and an OpenAPI 3.x ingest
+adapter (`openapi_source`, `toolconnect ingest-openapi`) that loads a local spec file
+into the same descriptor/claim model as the MCP adapter — the Phase-2 gate's
+protocol-neutral proof. See [SERVICE.md](SERVICE.md).
 What has **not** changed: ToolConnect still implements no tool of its own. `grep -rn "def invoke"
-src/` returns nothing and the discovery adapter has no `tools/call`. The gateway *forwards* an
+src/` returns nothing (the OpenAPI adapter included — it parses a document into claims
+and never calls one of its endpoints) and the discovery adapter has no `tools/call`. The gateway *forwards* an
 authorized, redeemed `tools/call` to a server someone else wrote — it carries the call, it never
 executes one, and the decision service it embeds stays out of the data path in every deployment.
 The in-memory core remains the semantic authority; persistence hydrates and stores it.
@@ -18,14 +22,15 @@ The in-memory core remains the semantic authority; persistence hydrates and stor
 |---|---|
 | Phase | **1 complete + 0.1.0 runtime** ([PHASE1_VALIDATION.md](PHASE1_VALIDATION.md), [SERVICE.md](SERVICE.md), [CHANGELOG.md](../CHANGELOG.md)) |
 | Code | decision core + store/service/server/CLI/MCP adapter/enforcement gateway under `src/toolconnect/` |
-| Gate | `.venv/bin/python -m pytest` — **462 passing, 3 skipped** (465 collected); under `unshare -rn` HTTP-loopback tests also skip (loopback down), everything else passes offline |
+| Gate | `.venv/bin/python -m pytest` — **516 passing, 3 skipped** (519 collected); under `unshare -rn` HTTP-loopback tests also skip (loopback down), everything else passes offline |
 | Language | Python 3.11 |
 | Deployment target | single box, local-first, offline decision path |
 | Blocking | the go/no-go questions below; the decisive one is whether a grant-time review artifact justifies a separate platform |
 
 **Phase 1 results in brief.** Cedar is suitable and proven on aarch64. Flow analysis is real,
-novel, and smaller than advertised. The differentiation claim survives at 2 of 3, with the third
-unproven rather than failed. Full detail, including the false positives, in
+novel, and smaller than advertised. The differentiation claim survives at 2 of 3, and the third —
+"protocol-neutral" — is now **proven for OpenAPI 3.x ingest** (read-only registry path; see open
+question 2 below) after being the Phase-1 gap. Full detail, including the false positives, in
 [PHASE1_VALIDATION.md](PHASE1_VALIDATION.md).
 
 ---
@@ -67,8 +72,14 @@ information.
 
 * Whether ToolConnect should be built at all. Phase 1 applied the
   [abandonment condition](ROADMAP.md#the-condition-under-which-this-roadmap-should-be-abandoned)
-  honestly: no claim failed, but "protocol-neutral" is **unproven** — every tool ingested so far
-  was MCP-shaped. Phase 2 must ingest an OpenAPI document or the claim collapses.
+  honestly: no claim failed, and the previously **unproven** "protocol-neutral" claim is now
+  **proven for OpenAPI 3.x ingest on the read-only registry path** — `openapi_source` parses a
+  local spec document straight into ToolConnect's own claim model (no MCP-shaped intermediate,
+  no FastMCP detour), and an OpenAPI-derived capability registers, is asserted, authorizes
+  through the same Cedar policy set, and audits identically to an MCP-discovered one
+  (`tests/test_openapi_source.py`). What this does **not** establish: ingest of any other
+  protocol (gRPC, GraphQL, JSON-RPC-over-HTTP), spec-driven *execution* (deliberately absent),
+  or proof that operators will write assertions for OpenAPI-derived tools at scale.
 * Whether flow analysis justifies a separate platform now that it is understood to be a grant-time
   review artifact rather than a runtime control. It is genuinely novel; it is also much smaller
   than the Phase 0 documents implied.
@@ -93,8 +104,13 @@ two that were Phase 0 blockers are now closed:
 What remains, decisive first:
 
 1. **Does a grant-time review artifact justify a separate platform?** Answer before Phase 2.
-2. **Does an OpenAPI document survive ingest without an MCP-shaped detour?** The "protocol-neutral"
-   claim is unproven and is the one that would break the premise.
+2. ~~Does an OpenAPI document survive ingest without an MCP-shaped detour?~~ — **answered.**
+   Yes: `openapi_source` normalizes an OpenAPI 3.x document directly into `DiscoveredTool`/
+   `ClaimedMetadata` (one capability per `operationId`, parameters and JSON request bodies
+   merged into the descriptor input schema) and the whole downstream path — namespaced
+   identity, assertion evidence, fail-closed Cedar authorization, drift, hash-chained audit —
+   works over it unmodified. The "protocol-neutral" claim is upgraded from unproven to proven
+   for OpenAPI 3.x ingest (read-only registry path); the abandonment rule does not trigger.
 3. **Is a `(tool, scope)` descriptor assertable in practice?** Trivial for `filesystem`, unclear
    for `postgres`, meaningless for `run_command`.
 4. **Who writes 53 assertions?** Attestation is the only proposed path and has no design.

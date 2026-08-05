@@ -1,0 +1,61 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "petstore-fixture",
+    "version": "1.0.0",
+    "description": "A small petstore-like spec used to prove protocol-neutral ingest."
+  },
+  "servers": [{"url": "http://127.0.0.1:9/never-called"}],
+  "paths": {
+    "/pets": {
+      "get": {
+        "operationId": "listPets",
+        "summary": "List all pets",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "integer", "maximum": 100}
+          }
+        ],
+        "responses": {"200": {"description": "a list of pets"}}
+      },
+      "post": {
+        "operationId": "createPet",
+        "summary": "Create a pet",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {"type": "string"},
+                  "tag": {"type": "string"}
+                },
+                "required": ["name"]
+              }
+            }
+          }
+        },
+        "responses": {"201": {"description": "created"}}
+      }
+    },
+    "/pets/{petId}": {
+      "parameters": [
+        {
+          "name": "petId",
+          "in": "path",
+          "required": true,
+          "schema": {"type": "string"}
+        }
+      ],
+      "delete": {
+        "operationId": "deletePet",
+        "summary": "Delete a pet by id — irreversible",
+        "responses": {"204": {"description": "deleted"}}
+      }
+    }
+  }
+}
