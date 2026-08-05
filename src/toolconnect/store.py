@@ -236,7 +236,7 @@ def asserted_to_json(a: AssertedDescriptor) -> str:
         "effect": a.effect.value,
         "reads": sorted(c.value for c in a.reads),
         "writes": sorted(c.value for c in a.writes),
-        "scopes": sorted(c.value for c in a.scopes),
+        "scopes": sorted(a.scopes),
         "reversible": a.reversible,
         "idempotent": a.idempotent,
         "requires_approval": a.requires_approval,
@@ -251,7 +251,7 @@ def asserted_from_json(raw: str) -> AssertedDescriptor:
         effect=Effect(d["effect"]),
         reads=frozenset(DataClass(c) for c in d.get("reads", ())),
         writes=frozenset(DataClass(c) for c in d.get("writes", ())),
-        scopes=frozenset(DataClass(c) for c in d.get("scopes", ())),
+        scopes=frozenset(d.get("scopes", ())),
         reversible=d.get("reversible", True),
         idempotent=d.get("idempotent", False),
         requires_approval=d.get("requires_approval", False),
@@ -434,7 +434,7 @@ class SqliteStore:
         cat = Catalog()
         with self._lock:
             for sid, tier, transport, declared in self._conn.execute(
-                    "SELECT source_id, name, tier, transport, declared FROM sources"):
+                    "SELECT source_id, tier, transport, declared FROM sources"):
                 cat.sources[sid] = TrustedSource(
                     source_id=sid, tier=TrustTier(tier), transport=transport)
                 cat.declared[sid] = set(json.loads(declared))
@@ -706,8 +706,8 @@ class SqliteStore:
             self._conn.execute("BEGIN IMMEDIATE")
             # The expiry clock is read AFTER the lock and transaction are held, so a
             # redeem that queued behind another grant operation (or a slow
-            # invocable_check) for longer than the remaining TTL is judged against the
-            # time the check actually runs — a pre-queue snapshot would let an
+            # invocable_check) for longer than the remaining TTL is judged against
+            # the time the check actually runs — a pre-queue snapshot would let an
             # already-expired grant redeem, violating inclusive-deny.
             now = datetime.now(timezone.utc)
             try:
