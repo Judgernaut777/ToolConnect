@@ -310,6 +310,15 @@ class _Handler(BaseHTTPRequestHandler):
                 b = self._body()
                 return svc.redeem_grant(
                     m["grant_id"], b.get("principal") or {}, b.get("args"))
+            if path == "/redemptions":
+                b = self._body()
+                kwargs: dict = {}
+                if "at" in b:
+                    kwargs["at"] = b["at"]
+                return svc.redeem_governance_grant(
+                    b.get("grant"), b.get("principal") or {},
+                    str(b.get("source_id", "")), str(b.get("name", "")),
+                    b.get("args"), **kwargs)
             if m := self._GRANT_CLOSE.match(path):
                 b = self._body()
                 return svc.close_grant(

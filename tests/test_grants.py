@@ -282,7 +282,7 @@ class TestMigration:
 
         store = SqliteStore(path)
         try:
-            assert store.schema_version == 4
+            assert store.schema_version == 5
             chain = store.verify_chain()
             assert chain.ok, chain.detail
             assert chain.records == 1
