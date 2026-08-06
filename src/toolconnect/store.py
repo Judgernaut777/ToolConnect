@@ -534,6 +534,22 @@ class SqliteStore:
         with self._lock, self._conn:
             return self._append_audit_in_txn(kind, body)
 
+    def set_meta(self, key: str, value: str) -> None:
+        """Upsert one ``meta`` row (durable key/value; used for deployment
+        posture facts such as the loaded ADR-052 revocation list's identity)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value))
+
+    def get_meta(self, key: str) -> str | None:
+        """Read one ``meta`` row; ``None`` when the key was never recorded."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row is not None else None
+
     def read_audit(self, kind: str | None = None, limit: int = 100) -> list[dict]:
         q = "SELECT seq, kind, body, created_at, record_hash FROM audit"
         args: tuple = ()

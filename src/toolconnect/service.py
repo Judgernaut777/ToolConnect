@@ -148,6 +148,7 @@ class ToolConnectService:
     def __init__(self, store: SqliteStore, engine: PolicyEngine,
                  bus: BusPublisher | None = None,
                  gov_trust_root_pem: str | None = None,
+                 gov_revocation_list: Mapping[str, Any] | None = None,
                  gov_provider_id: str = "toolconnect") -> None:
         self.store = store
         self.catalog = store.load_catalog()
@@ -165,6 +166,18 @@ class ToolConnectService:
         # trust root is configured, and every redemption attempt fails closed
         # (``missing_trust_root``) — and the failure is itself recorded.
         self.gov_trust_root_pem = gov_trust_root_pem
+        # The ADR-052 revocation list (R7): the issuer-signed JSON document,
+        # loaded at startup and held in memory beside the trust root —
+        # "distributed alongside trust roots, not polled at redemption time".
+        # None preserves the R5 behavior exactly (no revocation checks).
+        self.gov_revocation_list = gov_revocation_list
+        if gov_revocation_list is not None:
+            # Record which list is loaded, so /health and the audit projection
+            # can attest to the revocation posture without trusting the caller.
+            store.set_meta("gov_revocation_list_id",
+                           str(gov_revocation_list.get("list_id", "")))
+            store.set_meta("gov_revocation_list_issued_at",
+                           str(gov_revocation_list.get("issued_at", "")))
         self.gov_provider_id = gov_provider_id
         # Held across broker-call -> decision_id read -> grant insert -> grant_issue
         # append, so a concurrent in-process embedder (the HTTP server already
@@ -185,6 +198,13 @@ class ToolConnectService:
             "tools": len(self.catalog.tools),
             "audit_records": chain.records,
             "audit_chain_ok": chain.ok,
+            # R7: which ADR-052 revocation list (if any) this decision point
+            # enforces at redemption. None = legacy R5 posture, no list loaded.
+            "gov_revocation_list": (
+                {
+                    "list_id": self.store.get_meta("gov_revocation_list_id"),
+                    "issued_at": self.store.get_meta("gov_revocation_list_issued_at"),
+                } if self.gov_revocation_list is not None else None),
         }
 
     # -- sources ------------------------------------------------------------------
@@ -574,7 +594,8 @@ class ToolConnectService:
         instant = at if at is not None else datetime.now(timezone.utc).isoformat()
 
         verification = govgrants.verify_grant(
-            grant, self.gov_trust_root_pem, at=instant)
+            grant, self.gov_trust_root_pem, at=instant,
+            revocation_list=self.gov_revocation_list)
         payload = verification.payload
         grant_id = payload["grant_id"] if payload is not None else None
 
