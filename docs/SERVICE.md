@@ -210,6 +210,18 @@ against all five governance conformance vectors (`tests/test_govgrant_vectors.py
   `missing_trust_root`. An optional expected-key-id pin distinguishes `unknown_issuer`
   from `signature_mismatch` — a forged attribution fails as the wrong key, not as a bad
   signature.
+* **Trust-root posture in `GET /health`.** The health surface reports
+  `gov_trust_root: {"configured": bool, "key_ids": [...]}` — the governance key ids
+  (`ed25519:` + sha256 of the raw public key, derived via
+  `govgrants.public_key_id`), never the PEM itself — and `gov_provider_id`, the
+  service's configured provider id. A server with no trust root reports
+  `configured: false` with an empty `key_ids`; the key is never omitted, so a
+  control plane can distinguish "no trust root" from "old server". These fields
+  are additive: the decision contract version does not bump, because `/health`
+  is a posture surface, not the decision contract. The classification rule a
+  control plane relies on: **"enforcing" classification over HTTP requires
+  `gov_trust_root.configured == true` AND observable `provider_enforcement`
+  audit records via `GET /audit?kind=provider_enforcement`.**
 * **Verification is pure.** No wall clock: the validity window is checked against the
   request's `at` instant (half-open, same rule as the issuer); no network, no
   filesystem. Malformed grants, unsupported schemes, and wrong formats are typed
