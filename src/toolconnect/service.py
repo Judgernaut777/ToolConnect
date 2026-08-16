@@ -333,7 +333,7 @@ class ToolConnectService:
             self.catalog.ingest_claimed(source_id, name, claimed, version=version)
             tv = self.catalog.get(source_id, name)
             assert tv is not None
-            tv = replace(tv, input_schema=schema)
+            tv = replace(tv, input_schema=dict(schema))
             self.catalog.tools[(source_id, name)] = tv
             self.store.upsert_tool(tv)
             ingested.append(name)
@@ -540,8 +540,8 @@ class ToolConnectService:
         except hashing.ArgsNotHashable as exc:
             raise ServiceError(400, f"args cannot be canonicalized: {exc}")
         # redeem_grant appends the paired `grant_redeem`/`grant_close` audit record
-        # itself, in the same transaction as the mutation it belongs to (ADR 0002 §4).
-        # `grant_redeem_denied` has no mutation of its own to pair with — every
+        # itself, in the same transaction as the mutation it belongs to (ADR 0002
+        # §4). `grant_redeem_denied` has no mutation of its own to pair with — every
         # deny reason reaches here, including `not_invocable`, whose grant_close was
         # already committed inside redeem_grant above.
         result = self.store.redeem_grant(
