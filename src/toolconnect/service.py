@@ -113,8 +113,8 @@ def _tool_payload(svc: "ToolConnectService", source_id: str, name: str) -> dict:
     tv = svc.catalog.get(source_id, name)
     assert tv is not None
     return {
-        "source_id": tv.ref.source_id,
-        "name": tv.ref.name,
+        "source_id": source_id,
+        "name": name,
         "qualified_name": tv.qualified_name,
         "version": tv.ref.version,
         "claimed": {
@@ -246,7 +246,7 @@ class ToolConnectService:
 
     def list_sources(self) -> list[dict]:
         return [
-            {"source_id": s.source_id, "tier": t_tier(s), "transport": s.transport,
+            {"source_id": s.source_id, "tier": s.tier.value, "transport": s.transport,
              "declares": sorted(self.catalog.declared.get(s.source_id, ())),
              "tools": sorted(n for (sid, n) in self.catalog.tools if sid == s.source_id)}
             for s in self.catalog.sources.values()
@@ -307,8 +307,6 @@ class ToolConnectService:
 
     def ingest_payload(self, source_id: str, tools: list[Mapping[str, Any]]) -> dict:
         """Push-style ingest for non-stdio sources: the caller supplies the claims."""
-        if not source_id:
-            raise ServiceError(400, "source_id is required")
         if source_id not in self.catalog.sources:
             raise ServiceError(404, f"unknown source {source_id!r}")
         if not isinstance(tools, list):
@@ -360,7 +358,7 @@ class ToolConnectService:
 
     def assert_tool(self, source_id: str, name: str, descriptor: Mapping[str, Any]) -> dict:
         if not isinstance(descriptor, Mapping):
-            raise ServiceError(400, "descriptor must be a JSON object")
+            raise ServiceError(400, "descriptor must be an object")
         try:
             desc = asserted_from_json(_to_json(descriptor))
         except (KeyError, ValueError, TypeError) as exc:
@@ -428,8 +426,6 @@ class ToolConnectService:
     def drift(self, source_id: str) -> dict:
         """Drift against the last successful discovery. Refuses to guess when
         no observation exists — an unobserved source has unknown drift, not none."""
-        if not self.catalog.sources:
-            raise ServiceError(409, "no sources registered")
         if source_id not in self.catalog.sources:
             raise ServiceError(404, f"unknown source {source_id!r}")
         obs = self.store.last_discovery(source_id)
@@ -544,8 +540,8 @@ class ToolConnectService:
         except hashing.ArgsNotHashable as exc:
             raise ServiceError(400, f"args cannot be canonicalized: {exc}")
         # redeem_grant appends the paired `grant_redeem`/`grant_close` audit record
-        # itself, in the same transaction as the mutation it belongs to (ADR 0002 §
-        # 4). `grant_redeem_denied` has no mutation of its own to pair with — every
+        # itself, in the same transaction as the mutation it belongs to (ADR 0002 §4).
+        # `grant_redeem_denied` has no mutation of its own to pair with — every
         # deny reason reaches here, including `not_invocable`, whose grant_close was
         # already committed inside redeem_grant above.
         result = self.store.redeem_grant(
