@@ -205,6 +205,17 @@ class ToolConnectService:
                     "list_id": self.store.get_meta("gov_revocation_list_id"),
                     "issued_at": self.store.get_meta("gov_revocation_list_issued_at"),
                 } if self.gov_revocation_list is not None else None),
+            # R8: trust-root posture, so a control plane can classify this
+            # provider as "enforcing" over HTTP. Key ids only, never the PEM
+            # itself; ``configured`` is always present (false when no trust
+            # root is loaded) so absence is distinguishable from a server
+            # that simply does not know about the field.
+            "gov_trust_root": {
+                "configured": self.gov_trust_root_pem is not None,
+                "key_ids": ([govgrants.public_key_id(self.gov_trust_root_pem)]
+                            if self.gov_trust_root_pem is not None else []),
+            },
+            "gov_provider_id": self.gov_provider_id,
         }
 
     # -- sources ------------------------------------------------------------------
